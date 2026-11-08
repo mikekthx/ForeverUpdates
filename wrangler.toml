@@ -1,0 +1,51 @@
+name = "forever-updates"
+main = "src/index.ts"
+compatibility_date = "2026-10-01"
+# The workers.dev address serves the admin routes (bearer token). No per-version preview URLs:
+# each would run with the real secrets and database.
+workers_dev = true
+preview_urls = false
+
+[triggers]
+# One cron. Each run polls, probes watched posts for edits, re-queues stuck work, and after
+# 5 PM Pacific sends the daily digest (retrying every 5 minutes until it succeeds).
+crons = ["*/5 * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "forever-updates"
+database_id = "9a809e9d-0af2-4de0-baa8-85f6131b0b69"
+
+# Heavy work runs in queue consumers so each item gets its own CPU budget.
+[[queues.producers]]
+queue = "forever-updates-work"
+binding = "WORK"
+
+[[queues.producers]]
+queue = "forever-updates-classify"
+binding = "CLASSIFY"
+
+[[queues.consumers]]
+queue = "forever-updates-work"
+max_batch_size = 1          # one fetch/diff or alert per invocation
+max_batch_timeout = 1
+max_retries = 10
+max_concurrency = 2         # be gentle with Blizzard's servers
+
+[[queues.consumers]]
+queue = "forever-updates-classify"
+max_batch_size = 10         # up to 10 items per Gemini call
+max_batch_timeout = 20      # wait up to 20 s to fill a batch
+max_retries = 10
+max_concurrency = 1
+
+# Forums polled (default: US only). Uncomment to add EU back.
+# [vars]
+# FORUM_REGIONS = "us,eu"
+
+# Free fallback classifier (daily free allowance). Remove this block to disable it.
+[ai]
+binding = "AI"
+
+[observability]
+enabled = true

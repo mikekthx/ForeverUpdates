@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+test/.build/
+
+# Local only: real Blizzard responses (player posts, full articles) and the eval labels.
+fixtures/

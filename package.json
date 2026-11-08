@@ -1,0 +1,25 @@
+{
+  "name": "forever-updates",
+  "version": "4.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p .",
+    "test:unit": "tsx test/unit.test.mts",
+    "test:fixtures": "tsx test/fixtures.test.mts",
+    "test:e2e": "esbuild src/index.ts --bundle --format=esm --platform=neutral --external:cloudflare:* --outfile=test/.build/worker.mjs --log-level=warning && node test/integration.mjs",
+    "test": "npm run typecheck && npm run test:unit && npm run test:fixtures && npm run test:e2e",
+    "capture": "tsx scripts/capture.mjs",
+    "eval": "tsx scripts/eval.mts",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261027.1",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.153.0"
+  }
+}
