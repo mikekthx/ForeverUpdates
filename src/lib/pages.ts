@@ -64,6 +64,7 @@ export function landingPage(o: LandingOpts): string {
 <ul>
 <li><strong>Alerts, right away,</strong> for urgent posts: hotfixes, known issues, maintenance. Pinging a role is optional.</li>
 <li><strong>A daily digest</strong> of everything else that's relevant, at ${htmlEscape(o.digestTime)}.</li>
+<li><strong>A TL;DR</strong> with each alert and digest item, so you can see what changed at a glance.</li>
 </ul>
 ${action}
 <p class="muted">You pick the server and channel on Discord's own page, and you need the Manage Webhooks permission there. ForeverUpdates only gets a webhook for that channel: it can post there, and it can't read anything in your server.</p>

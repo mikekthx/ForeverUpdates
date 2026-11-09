@@ -242,13 +242,16 @@ export function embedTextLength(embed: any): number {
   return n;
 }
 
-/** Posted once to a channel that was just added on the public page. */
-export function welcomePayload(digestTime: string): Record<string, unknown> {
+/**
+ * Posted once to a channel that was just added on the public page. `nextDigest` (Unix seconds) is
+ * shown as a Discord timestamp, so each reader sees the digest time in their own time zone.
+ */
+export function welcomePayload(nextDigest: number): Record<string, unknown> {
   return {
     allowed_mentions: { parse: [] },
     embeds: [{
       title: "ForeverUpdates is set up in this channel",
-      description: `Urgent WoW: Forever news (hotfixes, known issues, maintenance) will be posted here right away, and a digest of everything else that's relevant every day at ${escapeMarkdown(digestTime)}.\n\nTo stop, delete this webhook in the channel's settings (Integrations → Webhooks).`,
+      description: `Urgent WoW: Forever news (hotfixes, known issues, maintenance) will be posted here right away, and a digest of everything else that's relevant every day at <t:${Math.floor(nextDigest)}:t>.\n\nEach alert and digest item comes with a short TL;DR, so you can see what changed at a glance.\n\nTo stop, delete this webhook in the channel's settings (Integrations → Webhooks).`,
       color: DIGEST_BLUE_POST_COLOR
     }]
   };

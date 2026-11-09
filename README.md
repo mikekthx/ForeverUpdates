@@ -5,6 +5,8 @@ A Discord notifier for **World of Warcraft: Forever**. It watches Blizzard's US 
 - **Alerts, right away,** for anything urgent: hotfixes, known issues, maintenance. When a watched post or article is edited, the new lines go through the same triage.
 - **A daily digest** of everything else that's relevant, at 5 PM Pacific.
 
+Each alert and digest item comes with a short TL;DR written by the model. Optionally, a public page lets other people add the same alerts to a channel in their own Discord server (see [Let other servers add it](#let-other-servers-add-it-optional)).
+
 It runs on Cloudflare's free tier (Workers, D1, Queues and Workers AI) and Gemini's free API tier.
 
 ## How it works
@@ -29,6 +31,8 @@ You need Node 20 or later, a Cloudflare account (the free plan is fine), a [Gemi
    npx wrangler login
    ```
 
+   The Worker's address is `https://<name>.<your-subdomain>.workers.dev`, where `<name>` is `name` in `wrangler.toml` (`forever-updates`). A new Cloudflare account picks its `workers.dev` subdomain on the first deploy.
+
 2. **Create the database.** `d1 create` prints a `database_id`: put it in `wrangler.toml`, and keep the binding name `DB`. Then create the tables:
 
    ```powershell
@@ -52,7 +56,9 @@ You need Node 20 or later, a Cloudflare account (the free plan is fine), a [Gemi
    npx wrangler secret put DISCORD_CRITICAL_ROLE_ID  # optional: a role to @mention on critical alerts
    ```
 
-5. **Point the User-Agent at your own fork.** Edit `USER_AGENT` in `src/config.ts`, so Blizzard can tell whose bot it is.
+   To copy a role's ID, turn on Developer Mode in Discord (User Settings → Advanced), then Server Settings → Roles → the role's ⋯ menu → **Copy Role ID**. If the role isn't pinged, turn on "Allow anyone to @mention this role" in its settings.
+
+5. **Point the links at your own fork.** Edit `USER_AGENT` in `src/config.ts`, so Blizzard can tell whose bot it is, and `REPO_URL` in `src/lib/pages.ts` (the "Source code" link on the public page).
 
 6. **Deploy.**
 
@@ -69,7 +75,7 @@ npx wrangler d1 execute forever-updates --remote --file=./schema.sql
 npx wrangler deploy
 ```
 
-If `d1 execute --remote` is refused, paste the contents of `schema.sql` into the D1 console in the Cloudflare dashboard instead.
+If `d1 execute --remote` is refused (for example with error 7403), paste the SQL statements from `schema.sql` into the D1 console in the Cloudflare dashboard (Storage & databases → D1 → your database → Console) instead.
 
 ### Check that it works
 
@@ -95,21 +101,18 @@ The Worker can also serve a public page where anyone can add the alerts to a cha
 
 Each added channel gets the same alerts and daily digest as yours. Each server can set its own role to ping on urgent alerts. Your own channel (`DISCORD_WEBHOOK_URL`) works as before, and health warnings go only to it.
 
-1. **Create a Discord application** at <https://discord.com/developers/applications>. Its name and icon are what people see on Discord's page and on the webhook's posts.
-2. **Add the redirect.** Under **OAuth2 → Redirects**, add `https://forever-updates.<your-subdomain>.workers.dev/discord/callback`. It must match exactly.
-3. **Set the two secrets.** Both are on the application's **OAuth2** page.
+1. **Create a Discord application** at <https://discord.com/developers/applications>: **New Application**, give it a name, **Create**. Its name and icon are what people see on Discord's authorize page and on the posts in their channel.
+2. **Add the redirect.** On the **OAuth2** page, under **Redirects**, add `https://forever-updates.<your-subdomain>.workers.dev/discord/callback` and save. It must match exactly (`https`, no trailing slash).
+3. **Turn off Discord's install button.** On the **Installation** page, set **Install Link** to **None**. No bot is needed, so leave the **Bot** page alone.
+4. **Set the two secrets.** Both are on the **OAuth2** page: copy the Client ID, and click **Reset Secret** for the Client Secret (Discord shows it only once). The page is live as soon as both are set, with no deploy needed.
 
    ```powershell
    npx wrangler secret put DISCORD_CLIENT_ID
    npx wrangler secret put DISCORD_CLIENT_SECRET
    ```
 
-4. **Deploy.** The tables this needs are in `schema.sql` (see [Updating an existing install](#updating-an-existing-install)):
-
-   ```powershell
-   npx wrangler d1 execute forever-updates --remote --file=./schema.sql
-   npx wrangler deploy
-   ```
+   An install set up before this feature existed needs the new tables first: see [Updating an existing install](#updating-an-existing-install).
+5. **Try it.** Open your Worker's address, click **Add to Discord** and pick a test channel. You should land on that channel's settings page, the channel should get a welcome message, and `/status` should show `publicPage: true` and one channel under `subscribers`. If you get "Discord didn't confirm the channel" instead, `npx wrangler tail` shows what Discord answered.
 
 Share `https://forever-updates.<your-subdomain>.workers.dev/`. After adding a channel, the person lands on that channel's settings page: a role to ping on urgent alerts, and **Remove**. Its address holds a secret key, so they should bookmark it. Adding the same channel again replaces its webhook and gives a new settings link (the role is kept). While sign-ups are full, that doesn't work: someone who lost the link can delete the webhook in Discord, which removes the channel, and add it again once a slot is free.
 
@@ -118,6 +121,8 @@ Share `https://forever-updates.<your-subdomain>.workers.dev/`. After adding a ch
 - One server can add at most `MAX_CHANNELS_PER_SERVER` (3) channels, so no one server can take every slot.
 - Sign-ups stop at `MAX_SUBSCRIBERS` (100) in `src/config.ts`. Each alert and digest costs one Discord request per channel, sent 20 at a time in work-queue messages, so 100 channels add about 5 queue messages per alert.
 - Without the two secrets, the page is off and `/` answers as before.
+- **What's stored per channel:** the webhook's ID and token, the server and channel IDs, the role ID and a hash of the settings key. Nothing from the server itself.
+- To remove a channel yourself, delete its row in the D1 console: `DELETE FROM webhooks WHERE channel_id = '<channel ID>';`. Its webhook stays in that server until someone deletes it there.
 
 ## Configuration
 

@@ -812,7 +812,11 @@ ok("geminiModels: the configured order, each model with its own settings");
   assert.deepEqual(digestClock(new Date("2026-11-09T01:00:00Z")), { date: "2026-11-08", hour: 17 }, "PST: 5 PM");
   assert.deepEqual(digestClock(new Date("2026-07-01T00:00:00Z")), { date: "2026-06-30", hour: 17 }, "PDT: 5 PM");
   assert.deepEqual(digestClock(new Date("2026-07-01T07:00:00Z")), { date: "2026-07-01", hour: 0 }, "PDT: midnight starts the next day");
-  ok("digestClock: Pacific date and hour, either side of daylight saving");
+  const { nextDigestAt } = await import("../src/digest.ts");
+  assert.equal(nextDigestAt(new Date("2026-11-09T18:20:00Z")), Date.parse("2026-11-10T01:00:00Z") / 1000, "PST: today, 5 PM");
+  assert.equal(nextDigestAt(new Date("2026-11-10T01:00:00Z")), Date.parse("2026-11-11T01:00:00Z") / 1000, "at 5 PM sharp: tomorrow's");
+  assert.equal(nextDigestAt(new Date("2026-07-01T12:00:00Z")), Date.parse("2026-07-02T00:00:00Z") / 1000, "PDT: an hour earlier in UTC");
+  ok("digestClock: Pacific date and hour, either side of daylight saving; nextDigestAt");
 }
 
 // Other servers' channels: each gets the alert with its own role, and nothing else can be mentioned.
@@ -846,7 +850,8 @@ ok("geminiModels: the configured order, each model with its own settings");
   assert.equal(readOAuthWebhook({ id: "1/2", token, channel_id: "423456789012345678" }), null);
   assert.equal(webhookUrl("323456789012345678", token), `https://discord.com/api/webhooks/323456789012345678/${token}`);
 
-  for (const p of [welcomePayload("5 PM Pacific"), roleNoticePayload("223456789012345678"), roleNoticePayload(null)] as any[]) {
+  assert.match(welcomePayload(1794272400).embeds[0].description as string, /every day at <t:1794272400:t>\..*TL;DR/s, "the digest time in each reader's own zone");
+  for (const p of [welcomePayload(1794272400), roleNoticePayload("223456789012345678"), roleNoticePayload(null)] as any[]) {
     assert.deepEqual(p.allowed_mentions, { parse: [] }, "set-up messages never ping");
   }
   assert.match(roleNoticePayload("223456789012345678").content as string, /<@&223456789012345678>/);

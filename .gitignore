@@ -6,3 +6,6 @@ test/.build/
 
 # Local only: real Blizzard responses (player posts, full articles) and the eval labels.
 fixtures/
+
+# Local only: notes for Claude Code.
+CLAUDE.md

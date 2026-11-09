@@ -20,6 +20,16 @@ export function digestClock(now: Date): { date: string; hour: number } {
 }
 
 /**
+ * When the next digest is due (DIGEST_HOUR in DIGEST_TIME_ZONE), as a Unix time in seconds.
+ * shortcut: steps through whole UTC hours, so a zone offset of :30 or :45 would be off by that much.
+ */
+export function nextDigestAt(now: Date): number {
+  let t = Math.floor(now.getTime() / 3_600_000) * 3_600_000;
+  while (t <= now.getTime() || digestClock(new Date(t)).hour !== DIGEST_HOUR) t += 3_600_000;
+  return t / 1000;
+}
+
+/**
  * Sends the day's ONE digest message once DIGEST_TIME_ZONE's clock passes DIGEST_HOUR (or now, for
  * /run-digest: a manual send is that day's digest). If Discord refuses it (nothing posted), the
  * next run tries again; once it's posted, or may have been, the day is closed. Returns null when

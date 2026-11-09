@@ -11,6 +11,7 @@
  */
 
 import { DIGEST_HOUR, DIGEST_TIME_ZONE, MAX_CHANNELS_PER_SERVER, MAX_SUBSCRIBERS, OAUTH_STATE_MAX_AGE_SEC } from "./config";
+import { nextDigestAt } from "./digest";
 import { deleteWebhook, exchangeOAuthCode, postDiscord } from "./discord";
 import { errMessage } from "./http";
 import { parseRoleInput, readOAuthWebhook, roleNoticePayload, webhookUrl, welcomePayload } from "./lib/discord";
@@ -171,7 +172,7 @@ async function callback(request: Request, env: Env, url: URL): Promise<Response>
   for (const o of old) {
     await deleteWebhook(o.id, o.token).catch(err => console.warn(`Could not delete replaced webhook ${o.id}:`, errMessage(err)));
   }
-  try { await postDiscord(webhookUrl(hook.id, hook.token), welcomePayload(digestTimeText()), 0); }
+  try { await postDiscord(webhookUrl(hook.id, hook.token), welcomePayload(nextDigestAt(new Date())), 0); }
   catch (err) { console.warn(`Welcome message to webhook ${hook.id} failed:`, errMessage(err)); }
   console.log(JSON.stringify({ event: "subscribed", webhook: hook.id, guild: hook.guildId, channel: hook.channelId, replaced: old.length }));
   return redirect(manageLink(hook.id, key, "new"), 303, clearState);
