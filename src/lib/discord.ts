@@ -248,7 +248,7 @@ export function welcomePayload(digestTime: string): Record<string, unknown> {
     allowed_mentions: { parse: [] },
     embeds: [{
       title: "ForeverUpdates is set up in this channel",
-      description: `Urgent WoW: Forever news (hotfixes, known issues, maintenance, launch problems) will be posted here right away, and a digest of everything else that's relevant every day at ${escapeMarkdown(digestTime)}.\n\nTo stop, delete this webhook in the channel's settings (Integrations → Webhooks).`,
+      description: `Urgent WoW: Forever news (hotfixes, known issues, maintenance) will be posted here right away, and a digest of everything else that's relevant every day at ${escapeMarkdown(digestTime)}.\n\nTo stop, delete this webhook in the channel's settings (Integrations → Webhooks).`,
       color: DIGEST_BLUE_POST_COLOR
     }]
   };

@@ -45,7 +45,7 @@ export function renderPage(title: string, body: string): string {
 <body>
 <main>
 ${body}
-<footer class="muted"><p>Unofficial. Not affiliated with or endorsed by Blizzard Entertainment. <a href="${REPO_URL}">Source code</a></p></footer>
+<footer class="muted"><p>Unofficial. Not affiliated with or endorsed by Blizzard Entertainment. <a href="${REPO_URL}" rel="noreferrer">Source code</a></p></footer>
 </main>
 </body>
 </html>`;
@@ -62,7 +62,7 @@ export function landingPage(o: LandingOpts): string {
 <h1>WoW: Forever news in your Discord server</h1>
 <p>ForeverUpdates watches Blizzard's forums and news site for <em>World of Warcraft: Forever</em> and posts to a channel you choose:</p>
 <ul>
-<li><strong>Alerts, right away,</strong> for urgent posts: hotfixes, known issues, maintenance, launch problems. You can have them ping a role.</li>
+<li><strong>Alerts, right away,</strong> for urgent posts: hotfixes, known issues, maintenance. Pinging a role is optional.</li>
 <li><strong>A daily digest</strong> of everything else that's relevant, at ${htmlEscape(o.digestTime)}.</li>
 </ul>
 ${action}
@@ -85,7 +85,7 @@ export function managePage(o: ManageOpts): string {
     : o.notice === "bad-role" ? `<p class="notice bad">That isn't a role ID. Paste the role's ID (a long number) or its mention, like <code>&lt;@&amp;123456789012345678&gt;</code>.</p>`
     : "";
   const channel = o.guildId
-    ? `<a href="https://discord.com/channels/${htmlEscape(o.guildId)}/${htmlEscape(o.channelId)}">open the channel in Discord</a>`
+    ? `<a href="https://discord.com/channels/${htmlEscape(o.guildId)}/${htmlEscape(o.channelId)}" rel="noreferrer">open the channel in Discord</a>`
     : `channel <code>${htmlEscape(o.channelId)}</code>`;
   const hidden = `<input type="hidden" name="id" value="${htmlEscape(o.id)}"><input type="hidden" name="key" value="${htmlEscape(o.key)}">`;
   const health = o.lastError

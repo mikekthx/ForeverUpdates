@@ -23,7 +23,8 @@ const world = {
   expectedThinking: { "gemini-3.5-flash-lite": "high", "gemini-3.6-flash": "low" },
   discordFailNext: 0, discordFailStatus: 500, discordDropReplyNext: 0, discord: [], geminiCalls: [],
   // Other servers' webhooks: the id each message went to (parallel to discord), OAuth codes, deletes.
-  discordTo: [], oauthCodes: {}, oauthExchanges: 0, deletedWebhooks: [], goneWebhooks: new Set(), webhookFail: {}
+  discordTo: [], oauthCodes: {}, oauthExchanges: 0, deletedWebhooks: [], goneWebhooks: new Set(), webhookFail: {},
+  webhook429: {}, onWebhookPost: null // onWebhookPost(id): runs while a post is in flight, before Discord answers
 };
 
 const siteJson = region => ({
@@ -124,6 +125,8 @@ async function outbound(request) {
     const body = await request.json();
     if (world.goneWebhooks.has(hookId)) return jsonRes({ message: "Unknown Webhook", code: 10015 }, 404);
     if (world.webhookFail[hookId] > 0) { world.webhookFail[hookId]--; return new Response("bad gateway", { status: 502 }); }
+    if (world.webhook429[hookId] > 0) { world.webhook429[hookId]--; return jsonRes({ message: "You are being rate limited.", retry_after: 2, global: false }, 429); }
+    if (world.onWebhookPost) await world.onWebhookPost(hookId);
     if (world.discordFailNext > 0) { world.discordFailNext--; return new Response("boom", { status: world.discordFailStatus }); }
     world.discord.push(body);
     world.discordTo.push(hookId);
@@ -1027,6 +1030,8 @@ try {
     assert.equal((await connect({ webhookId: B, channelId: B_CH, guildId: "723456789012345678" })).status, 303);
 
     // The same channel added again: its earlier webhook is deleted and replaced, keeping the role.
+    // An alert still waiting for the old webhook moves to the new one; finished rows don't.
+    await db.prepare(`INSERT INTO deliveries (broadcast_id, webhook_id, state) VALUES ('t-waiting', ?1, 'pending'), ('t-done', ?1, 'sent')`).bind(A1).run();
     r = await connect({ webhookId: A2, channelId: A_CH });
     assert.equal(r.status, 303);
     const keyA2 = new URL(r.headers.get("location"), "http://localhost").searchParams.get("key");
@@ -1034,6 +1039,9 @@ try {
     assert.equal(await hookRow(A1), null);
     assert.equal((await hookRow(A2)).role_id, ROLE);
     assert.equal((await page(manageA1)).status, 404, "the old manage link stops working");
+    const moved = (await db.prepare("SELECT broadcast_id, webhook_id, state FROM deliveries WHERE broadcast_id LIKE 't-%'").all()).results;
+    assert.deepEqual(moved, [{ broadcast_id: "t-waiting", webhook_id: A2, state: "pending" }]);
+    await db.prepare("DELETE FROM deliveries WHERE broadcast_id LIKE 't-%'").run();
     let st = await call("/status");
     assert.equal(st.body.subscribers.channels, 2);
     assert.ok(!JSON.stringify(st.body).includes("tok_"), "/status never shows webhook tokens");
@@ -1084,7 +1092,13 @@ try {
     world.usTracker = [...world.usTracker, forumPost({ region: "us", categoryId: 348, title: "Thanks for the Skyborne feedback", text: "We read every post. Thank you!", topicId: 9103 })];
     await poll(); await settle();
     d0 = world.discord.length;
+    let stateDuringPost = null;
+    world.onWebhookPost = async id => {
+      if (id === A2) stateDuringPost = (await db.prepare("SELECT state FROM deliveries WHERE webhook_id = ? AND broadcast_id LIKE 'digest:%'").bind(A2).first())?.state;
+    };
     await poll(pt("17:05")); await settle();
+    world.onWebhookPost = null;
+    assert.equal(stateDuringPost, "sent", "marked sent before the post: a run that stops mid-post never reposts it");
     const ownerDigest = sentTo("1", d0).filter(m => /updates? today$/.test(m.content ?? ""));
     const aDigest = sentTo(A2, d0);
     assert.deepEqual([ownerDigest.length, aDigest.length], [1, 1]);
@@ -1095,6 +1109,33 @@ try {
     assert.equal(sentTo(A2, d0).length, 1, "one digest a day");
     ok("fan-out: the daily digest goes to every channel once, without pings");
 
+    // A digest Discord rate-limited (429) wasn't posted: it's retried. After a 5xx it may have been: never again.
+    const digestAgain = async (topicId, fail) => {
+      await db.prepare("DELETE FROM deliveries WHERE broadcast_id LIKE 'digest:%'").run();
+      await db.prepare("DELETE FROM broadcasts WHERE id LIKE 'digest:%'").run();
+      await db.prepare("DELETE FROM kv WHERE key IN ('digest:last', 'digest:inflight')").run();
+      world.usTracker = [...world.usTracker, forumPost({ region: "us", categoryId: 348, title: `Skyborne notes ${topicId}`, text: "Some thoughts on Skyborne.", topicId })];
+      await poll(); await settle();
+      fail();
+      const from = world.discord.length;
+      await poll(pt("17:05")); await settle();
+      assert.equal(sentTo(A2, from).length, 0);
+      const row = await db.prepare("SELECT state, last_error FROM deliveries WHERE webhook_id = ? AND broadcast_id LIKE 'digest:%'").bind(A2).first();
+      await db.prepare("UPDATE deliveries SET claimed_at = datetime('now', '-10 minutes') WHERE broadcast_id LIKE 'digest:%'").run();
+      await db.prepare("UPDATE broadcasts SET nudged_at = datetime('now', '-30 minutes')").run();
+      await poll(pt("17:10")); await settle();
+      return { row, later: sentTo(A2, from).length };
+    };
+    let again = await digestAgain(9105, () => { world.webhook429[A2] = 1; });
+    assert.equal(again.row.state, "pending");
+    assert.match(again.row.last_error, /rate limited/);
+    assert.equal(again.later, 1, "posted once the claim expired");
+    again = await digestAgain(9106, () => { world.webhookFail[A2] = 1; });
+    assert.equal(again.row.state, "sent");
+    assert.match(again.row.last_error, /maybe posted: .*502/);
+    assert.equal(again.later, 0, "never reposted");
+    ok("fan-out: a rate-limited digest is retried; one that may have been posted is not");
+
     // Remove from the manage page: the webhook is deleted on Discord too.
     r = await page("/discord/manage", form({ id: A2, key: keyA2, action: "remove" }));
     assert.deepEqual([r.status, /Removed/.test(r.text)], [200, true]);
@@ -1102,6 +1143,19 @@ try {
     assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM webhooks").first()).n, 0);
     assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM deliveries").first()).n, 0);
     ok("public page: Remove deletes the webhook and forgets the channel");
+
+    // One server can add at most MAX_CHANNELS_PER_SERVER (3) channels; re-adding one of them still works.
+    {
+      const G = "823456789012345678", id = i => `37000000000000000${i}`, ch = i => `47000000000000000${i}`;
+      for (const i of [1, 2, 3]) assert.equal((await connect({ webhookId: id(i), channelId: ch(i), guildId: G })).status, 303);
+      r = await connect({ webhookId: id(4), channelId: ch(4), guildId: G });
+      assert.deepEqual([r.status, /enough channels/.test(r.text)], [409, true]);
+      assert.ok(world.deletedWebhooks.includes(id(4)), "the webhook Discord just created is deleted");
+      assert.equal(await hookRow(id(4)), null);
+      assert.equal((await connect({ webhookId: id(5), channelId: ch(2), guildId: G })).status, 303, "re-adding a channel isn't a new one");
+      await db.prepare("DELETE FROM webhooks").run();
+    }
+    ok("public page: one server can add at most 3 channels");
 
     // More channels than one queue message posts to (FANOUT_PER_MESSAGE = 20): the parts chain.
     await db.prepare(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 45)
@@ -1118,6 +1172,50 @@ try {
     await db.prepare("DELETE FROM webhooks").run();
     await db.prepare("DELETE FROM deliveries").run();
     ok("fan-out: 45 channels are reached over chained queue messages, each once");
+
+    // 25 channels whose first post failed: once their claims expire, one restart reaches all 25 (20 + 5).
+    {
+      const ids = Array.from({ length: 25 }, (_, i) => `36${String(i + 1).padStart(16, "0")}`);
+      for (const [i, hid] of ids.entries()) {
+        await db.prepare("INSERT INTO webhooks (id, token, channel_id, manage_hash) VALUES (?, ?, ?, 'h')").bind(hid, hookToken(hid), `46${String(i + 1).padStart(16, "0")}`).run();
+        world.webhookFail[hid] = 1;
+      }
+      d0 = world.discord.length;
+      world.usTracker = [...world.usTracker, forumPost({ region: "us", categoryId: 348, title: "Emergency realm maintenance extended", text: "Realms stay offline for emergency maintenance.", topicId: 9107 })];
+      await poll(); await settle();
+      assert.equal(world.discordTo.slice(d0).filter(x => x?.startsWith("36")).length, 0);
+      await db.prepare("UPDATE deliveries SET claimed_at = datetime('now', '-10 minutes') WHERE state = 'pending'").run();
+      await db.prepare("UPDATE broadcasts SET nudged_at = datetime('now', '-30 minutes')").run();
+      await poll(); await settle();
+      const got = world.discordTo.slice(d0).filter(x => x?.startsWith("36"));
+      assert.deepEqual([got.length, new Set(got).size], [25, 25], "all 25 in one restart, each once");
+      await db.prepare("DELETE FROM webhooks").run();
+      await db.prepare("DELETE FROM deliveries").run();
+    }
+    ok("fan-out: a restart after failures keeps chaining until every due channel is reached");
+
+    // The channel is re-added while an alert is being posted to its old webhook: the alert goes on to
+    // the new webhook right away, not after the sweeper.
+    {
+      const X1 = "380000000000000001", X2 = "380000000000000002", X_CH = "480000000000000001";
+      assert.equal((await connect({ webhookId: X1, channelId: X_CH, guildId: "923456789012345678" })).status, 303);
+      let readded = null;
+      world.onWebhookPost = async hid => {
+        if (hid !== X1) return;
+        world.onWebhookPost = null;
+        readded = await connect({ webhookId: X2, channelId: X_CH, guildId: "923456789012345678" });
+      };
+      d0 = world.discord.length;
+      world.usTracker = [...world.usTracker, forumPost({ region: "us", categoryId: 348, title: "Emergency realm restart tonight", text: "Realms go offline for an emergency restart tonight.", topicId: 9108 })];
+      await poll(); await settle();
+      world.onWebhookPost = null;
+      assert.equal(readded?.status, 303);
+      assert.equal(sentTo(X2, d0).filter(m => m.embeds?.[0]?.title?.includes("Emergency realm restart tonight")).length, 1, "reached the new webhook without waiting");
+      assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM deliveries WHERE state = 'pending'").first()).n, 0);
+      await db.prepare("DELETE FROM webhooks").run();
+      await db.prepare("DELETE FROM deliveries").run();
+    }
+    ok("fan-out: re-adding a channel mid-post passes its alert on to the new webhook at once");
 
     // Full: no new sign-ups, and a webhook created anyway (sign-up started before) is deleted.
     const early = await startInstall();

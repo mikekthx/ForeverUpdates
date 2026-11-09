@@ -106,6 +106,8 @@ export const DISCORD_API = "https://discord.com/api/v10";
 /** Channels that can sign up. Each alert or digest costs one Discord request per channel (Workers
  * Free: 50 per invocation, so they're spread over queue messages of FANOUT_PER_MESSAGE). */
 export const MAX_SUBSCRIBERS = 100;
+/** So one server can't take every slot. Re-adding a channel doesn't count against it. */
+export const MAX_CHANNELS_PER_SERVER = 3;
 export const FANOUT_PER_MESSAGE = 20;
 /** A claimed delivery that's still pending this long later is claimed again (each post times out in 10 s). */
 export const FANOUT_LEASE_MIN = 3;

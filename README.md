@@ -2,7 +2,7 @@
 
 A Discord notifier for **World of Warcraft: Forever**. It watches Blizzard's US forums and the Blizzard news site, uses Gemini to decide what matters, and posts to a Discord channel:
 
-- **Alerts, right away,** for anything urgent: hotfixes, known issues, maintenance, launch problems. When a watched post or article is edited, the new lines go through the same triage.
+- **Alerts, right away,** for anything urgent: hotfixes, known issues, maintenance. When a watched post or article is edited, the new lines go through the same triage.
 - **A daily digest** of everything else that's relevant, at 5 PM Pacific.
 
 It runs on Cloudflare's free tier (Workers, D1, Queues and Workers AI) and Gemini's free API tier.
@@ -60,6 +60,17 @@ You need Node 20 or later, a Cloudflare account (the free plan is fine), a [Gemi
    npx wrangler deploy
    ```
 
+### Updating an existing install
+
+**Apply `schema.sql` before you deploy a new version.** It only creates tables that are missing, so running it again is safe. The Worker queries every table on each run, even for features you haven't turned on. If a table is missing, polling, alerts and the digest all stop.
+
+```powershell
+npx wrangler d1 execute forever-updates --remote --file=./schema.sql
+npx wrangler deploy
+```
+
+If `d1 execute --remote` is refused, paste the contents of `schema.sql` into the D1 console in the Cloudflare dashboard instead.
+
 ### Check that it works
 
 The admin routes need the bearer token:
@@ -93,17 +104,18 @@ Each added channel gets the same alerts and daily digest as yours. Each server c
    npx wrangler secret put DISCORD_CLIENT_SECRET
    ```
 
-4. **Add the new tables** to an existing database (the schema only creates what's missing), then deploy:
+4. **Deploy.** The tables this needs are in `schema.sql` (see [Updating an existing install](#updating-an-existing-install)):
 
    ```powershell
    npx wrangler d1 execute forever-updates --remote --file=./schema.sql
    npx wrangler deploy
    ```
 
-Share `https://forever-updates.<your-subdomain>.workers.dev/`. After adding a channel, the person lands on that channel's settings page: a role to ping on urgent alerts, and **Remove**. Its address holds a secret key, so they should bookmark it. Adding the same channel again replaces its webhook and gives a new settings link (the role is kept).
+Share `https://forever-updates.<your-subdomain>.workers.dev/`. After adding a channel, the person lands on that channel's settings page: a role to ping on urgent alerts, and **Remove**. Its address holds a secret key, so they should bookmark it. Adding the same channel again replaces its webhook and gives a new settings link (the role is kept). While sign-ups are full, that doesn't work: someone who lost the link can delete the webhook in Discord, which removes the channel, and add it again once a slot is free.
 
 - A server that deletes the webhook in Discord is dropped on the next post.
 - `/status` shows the channels (never their tokens) under `subscribers`.
+- One server can add at most `MAX_CHANNELS_PER_SERVER` (3) channels, so no one server can take every slot.
 - Sign-ups stop at `MAX_SUBSCRIBERS` (100) in `src/config.ts`. Each alert and digest costs one Discord request per channel, sent 20 at a time in work-queue messages, so 100 channels add about 5 queue messages per alert.
 - Without the two secrets, the page is off and `/` answers as before.
 

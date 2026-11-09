@@ -57,7 +57,11 @@ export async function processFanout(env: Env, id: string): Promise<void> {
   const claim = crypto.randomUUID();
   const [, claimedRes, broadcastRes] = await db.batch<any>([
     db.prepare(
-      `UPDATE deliveries SET claim = ?1, claimed_at = datetime('now'), attempts = attempts + 1
+      // A digest is marked sent before it's posted: if this run stops after Discord took it, it's
+      // never posted again (at most once, like the owner's channel). An alert stays pending.
+      `UPDATE deliveries SET claim = ?1, claimed_at = datetime('now'), attempts = attempts + 1,
+         state = CASE WHEN (SELECT kind FROM broadcasts WHERE id = ?2) = 'digest' THEN 'sent' ELSE state END,
+         last_error = CASE WHEN (SELECT kind FROM broadcasts WHERE id = ?2) = 'digest' THEN 'maybe posted: run stopped' ELSE last_error END
        WHERE rowid IN (
          SELECT d.rowid FROM deliveries d JOIN webhooks w ON w.id = d.webhook_id
          WHERE d.broadcast_id = ?2 AND d.state = 'pending'
@@ -91,7 +95,6 @@ export async function processFanout(env: Env, id: string): Promise<void> {
     if (o.status === "fulfilled") { sent.push(r.webhook_id); return; }
     const err = o.reason;
     const msg = errMessage(err);
-    stmts.push(db.prepare("UPDATE webhooks SET last_error = ? WHERE id = ?").bind(clip(msg, 300), r.webhook_id));
     if (err instanceof DiscordError && err.gone) {
       // The server removed the webhook: forget the channel.
       console.log(`Webhook ${r.webhook_id} is gone (${err.status}); removing that channel`);
@@ -99,10 +102,11 @@ export async function processFanout(env: Env, id: string): Promise<void> {
       stmts.push(db.prepare("DELETE FROM webhooks WHERE id = ?").bind(r.webhook_id));
       return;
     }
+    stmts.push(db.prepare("UPDATE webhooks SET last_error = ? WHERE id = ?").bind(clip(msg, 300), r.webhook_id));
     const rateLimited = err instanceof DiscordError && err.status === 429;
     if (err instanceof DiscordError && err.refused && !rateLimited) { setState(r, "failed", msg); return; }
-    // A digest is posted at most once, as for the owner's channel: after no answer or a 5xx it may
-    // have been posted. A duplicate alert is better than a missed one.
+    // A digest is posted at most once: after no answer or a 5xx it may have been posted. A 429 means
+    // it wasn't, so it goes back to pending. A duplicate alert is better than a missed one.
     if (broadcast.kind === "digest" && !rateLimited) { setState(r, "sent", `maybe posted: ${msg}`); return; }
     if (r.attempts >= FANOUT_MAX_ATTEMPTS) { setState(r, "failed", msg); return; }
     setState(r, "pending", msg);
@@ -119,12 +123,13 @@ export async function processFanout(env: Env, id: string): Promise<void> {
   }
   stmts.push(db.prepare(
     `SELECT COUNT(*) AS n FROM deliveries d JOIN webhooks w ON w.id = d.webhook_id
-     WHERE d.broadcast_id = ? AND d.state = 'pending' AND d.claimed_at IS NULL`
-  ).bind(id));
+     WHERE d.broadcast_id = ? AND d.state = 'pending' AND (d.claimed_at IS NULL OR d.claimed_at < datetime('now', ?))`
+  ).bind(id, `-${FANOUT_LEASE_MIN} minutes`));
   const results = await db.batch<any>(stmts);
   await bumpCounter(db, `fanout:${broadcast.kind}`, sent.length);
 
-  // Channels not tried yet: next part now. Channels to retry: one message after their claim expires,
+  // Channels ready now (never tried, or an earlier claim expired): next part now. Channels that failed
+  // in this run: one message after their claim expires,
   // within the sweeper's window so the two don't overlap.
   const fresh = Number(results.at(-1)?.results?.[0]?.n ?? 0);
   const sends: Promise<void>[] = [];

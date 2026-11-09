@@ -10,7 +10,7 @@
  * On only when DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET are set; otherwise these paths answer as before.
  */
 
-import { DIGEST_HOUR, DIGEST_TIME_ZONE, MAX_SUBSCRIBERS, OAUTH_STATE_MAX_AGE_SEC } from "./config";
+import { DIGEST_HOUR, DIGEST_TIME_ZONE, MAX_CHANNELS_PER_SERVER, MAX_SUBSCRIBERS, OAUTH_STATE_MAX_AGE_SEC } from "./config";
 import { deleteWebhook, exchangeOAuthCode, postDiscord } from "./discord";
 import { errMessage } from "./http";
 import { parseRoleInput, readOAuthWebhook, roleNoticePayload, webhookUrl, welcomePayload } from "./lib/discord";
@@ -137,28 +137,37 @@ async function callback(request: Request, env: Env, url: URL): Promise<Response>
   if (!hook) return html(messagePage("Discord didn't confirm the channel", "Nothing was added. Try again in a minute.", startOver), 502, clearState);
 
   const db = env.DB;
-  // The same channel added again replaces its earlier webhook (and keeps its role), so it never
-  // gets every message twice. This is also how a lost manage link is replaced.
-  const { results } = await db.prepare("SELECT id, token, role_id FROM webhooks WHERE channel_id = ?")
-    .bind(hook.channelId).all<{ id: string; token: string; role_id: string | null }>();
-  const old = (results ?? []).filter(o => o.id !== hook.id);
-  if ((await subscriberCount(db)) - old.length >= MAX_SUBSCRIBERS) {
-    await deleteWebhook(hook.id, hook.token).catch(err => console.warn("Could not delete the new webhook:", errMessage(err)));
-    return html(landingPage({ full: true, digestTime: digestTimeText() }), 503, clearState);
-  }
-
   const key = randomKey(32);
-  const roleId = old.find(o => o.role_id)?.role_id ?? null;
-  await db.batch([
-    ...old.flatMap(o => [
-      db.prepare("DELETE FROM deliveries WHERE webhook_id = ?").bind(o.id),
-      db.prepare("DELETE FROM webhooks WHERE id = ?").bind(o.id)
-    ]),
+  // One transaction. The insert checks both limits itself (all channels; channels of this server;
+  // the channel's own earlier webhooks don't count), so sign-ups at the same moment can't go over
+  // them. If it went in, every other webhook of this channel is replaced by it (keeping the role
+  // and any alerts still waiting), so a channel never gets every message twice. This is also how a
+  // lost manage link is replaced.
+  const added = "EXISTS (SELECT 1 FROM webhooks WHERE id = ?1)";
+  const others = "SELECT id FROM webhooks WHERE channel_id = ?2 AND id != ?1";
+  const [inserted, , , replacedRes] = await db.batch<{ id: string; token: string }>([
     db.prepare(
-      `INSERT INTO webhooks (id, token, guild_id, channel_id, role_id, manage_hash) VALUES (?, ?, ?, ?, ?, ?)
+      `INSERT INTO webhooks (id, token, guild_id, channel_id, role_id, manage_hash)
+       SELECT ?1, ?2, ?3, ?4, (SELECT role_id FROM webhooks WHERE channel_id = ?4 AND role_id IS NOT NULL LIMIT 1), ?5
+       WHERE (SELECT COUNT(*) FROM webhooks WHERE channel_id != ?4) < ?6
+         AND (?3 IS NULL OR (SELECT COUNT(*) FROM webhooks WHERE guild_id = ?3 AND channel_id != ?4) < ?7)
        ON CONFLICT(id) DO UPDATE SET token = excluded.token, manage_hash = excluded.manage_hash`
-    ).bind(hook.id, hook.token, hook.guildId, hook.channelId, roleId, await sha256Hex(key))
+    ).bind(hook.id, hook.token, hook.guildId, hook.channelId, await sha256Hex(key), MAX_SUBSCRIBERS, MAX_CHANNELS_PER_SERVER),
+    // Unclaimed, so the send in progress (if any) passes it straight on to the new webhook.
+    db.prepare(`UPDATE OR IGNORE deliveries SET webhook_id = ?1, claim = NULL, claimed_at = NULL WHERE state = 'pending' AND webhook_id IN (${others}) AND ${added}`).bind(hook.id, hook.channelId),
+    db.prepare(`DELETE FROM deliveries WHERE webhook_id IN (${others}) AND ${added}`).bind(hook.id, hook.channelId),
+    db.prepare(`DELETE FROM webhooks WHERE channel_id = ?2 AND id != ?1 AND ${added} RETURNING id, token`).bind(hook.id, hook.channelId)
   ]);
+  const old = replacedRes.results ?? [];
+  if (!inserted.meta?.changes) {
+    await deleteWebhook(hook.id, hook.token).catch(err => console.warn("Could not delete the new webhook:", errMessage(err)));
+    if (await isFull(db)) return html(landingPage({ full: true, digestTime: digestTimeText() }), 503, clearState);
+    return html(messagePage(
+      "This server has enough channels",
+      `ForeverUpdates already posts in ${MAX_CHANNELS_PER_SERVER} channels of this server, the most one server can have. Remove it from one of them first (on that channel's settings page, or by deleting its webhook in Discord).`,
+      startOver
+    ), 409, clearState);
+  }
   for (const o of old) {
     await deleteWebhook(o.id, o.token).catch(err => console.warn(`Could not delete replaced webhook ${o.id}:`, errMessage(err)));
   }

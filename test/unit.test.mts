@@ -865,7 +865,7 @@ ok("geminiModels: the configured order, each model with its own settings");
   });
   assert.doesNotMatch(page, /<script|<img/);
   assert.match(page, /value="k&quot;&gt;&lt;script&gt;"/);
-  assert.match(page, /https:\/\/discord\.com\/channels\/523456789012345678\/423456789012345678/);
+  assert.match(page, /https:\/\/discord\.com\/channels\/523456789012345678\/423456789012345678" rel="noreferrer"/, "external links never carry the manage link as a Referer");
   assert.doesNotMatch(messagePage("<b>", "<i>", { href: `"x`, label: "<u>" }), /<b>|<i>|<u>|href=""x"/);
   for (const html of [land, page]) assert.doesNotMatch(html, /<script/);
   ok("public pages: escaped values, no scripts, no install button when full");
