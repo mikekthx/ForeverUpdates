@@ -6,6 +6,7 @@
  *           document's new baseline are written in one atomic batch, so an edit can never be
  *           lost or reported twice, whatever happens to classification later.
  *  deliver: (re)send a critical alert to Discord.
+ *  fanout:  send an alert or digest to other servers' channels (src/fanout.ts).
  */
 
 import {
@@ -14,6 +15,7 @@ import {
 } from "./config";
 import { bumpCounter } from "./db";
 import { DiscordError, postDiscord } from "./discord";
+import { processFanout } from "./fanout";
 import { errMessage, getHtml, getJson } from "./http";
 import { UPDATE_MARKER, markAddedLines } from "./lib/diff";
 import { buildAlertPayload } from "./lib/discord";
@@ -32,9 +34,9 @@ export async function handleWorkBatch(batch: MessageBatch<WorkMessage>, env: Env
   for (const msg of batch.messages) {
     try {
       const body = msg.body;
-      const out = body.t === "fetch"
-        ? await processFetch(env, body.key, !!body.baseline, msg.attempts)
-        : await processDeliver(env, body.id, msg.attempts);
+      const out = body.t === "fetch" ? await processFetch(env, body.key, !!body.baseline, msg.attempts)
+        : body.t === "deliver" ? await processDeliver(env, body.id, msg.attempts)
+        : (await processFanout(env, body.id), {});
       if (out.retryAfterSec) msg.retry({ delaySeconds: out.retryAfterSec });
       else msg.ack();
     } catch (err) {

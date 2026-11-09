@@ -5,7 +5,9 @@
 
 import { CLASSIFY_MAX_ATTEMPTS, OPERATIONAL_TITLE, WATCH_TIERS } from "./config";
 import { bumpCounter, placeholders, sqlTime } from "./db";
+import { broadcastStmts, startFanout } from "./fanout";
 import { Classification, heuristicClassify } from "./lib/classify";
+import { buildAlertPayload } from "./lib/discord";
 import { classifyItems } from "./llm/chain";
 import type { PromptItem } from "./llm/prompt";
 import type { ClassifyMessage, Env, EventRow } from "./types";
@@ -46,6 +48,7 @@ export async function handleClassifyBatch(batch: MessageBatch<ClassifyMessage>, 
 
   // Store results. Forum-verified items are always relevant; irrelevant items are never critical.
   const stmts: D1PreparedStatement[] = [];
+  const fanouts: { at: number; id: string }[] = []; // statement index of each broadcast's deliveries
   for (const row of rows) {
     const d = decided.get(row.id);
     if (!d) continue;
@@ -57,6 +60,14 @@ export async function handleClassifyBatch(batch: MessageBatch<ClassifyMessage>, 
        WHERE id = ? AND state = 'pending'`
     ).bind(d.by, relevant ? 1 : 0, critical ? 1 : 0, d.cls.category, d.cls.summary, d.cls.urgency_rationale,
       critical ? "pending" : null, relevant && !critical ? "queued" : null, row.id));
+    // Other servers' channels get the same alert (with their own role), stored with the result.
+    if (critical) {
+      const payload = buildAlertPayload({ title: row.title, url: row.url, content: row.content, summary: d.cls.summary }, {});
+      const [broadcast, deliveries] = broadcastStmts(db, row.id, "alert", payload);
+      stmts.push(broadcast);
+      fanouts.push({ at: stmts.length, id: row.id });
+      stmts.push(deliveries);
+    }
 
     // Watch relevant news articles that look operational (or were critical) for later edits.
     if (row.kind === "new" && row.doc_key.startsWith("news:") && relevant && (critical || OPERATIONAL_TITLE.test(row.title))) {
@@ -75,7 +86,8 @@ export async function handleClassifyBatch(batch: MessageBatch<ClassifyMessage>, 
   if (overflow.length) {
     stmts.push(db.prepare(`UPDATE events SET nudged_at = datetime('now') WHERE id IN (${placeholders(overflow.length)})`).bind(...overflow));
   }
-  if (stmts.length) await db.batch(stmts);
+  const stored = stmts.length ? await db.batch(stmts) : [];
+  await startFanout(env, fanouts.filter(f => (stored[f.at]?.meta?.changes ?? 0) > 0).map(f => f.id));
   for (const by of ["gemini", "gemini-backup", "workers-ai", "keywords"] as const) {
     await bumpCounter(db, `classified:${by}`, [...decided.values()].filter(d => d.by === by).length);
   }

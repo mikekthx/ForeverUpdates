@@ -1,4 +1,4 @@
--- ForeverUpdates — v4 schema.
+-- ForeverUpdates — v4 schema. Safe to run again: it only creates what is missing.
 -- Two core tables: documents (every post/article ever seen, with its last known text) and
 -- events (each new post or edit to triage). A new post is just an edit from nothing.
 
@@ -78,3 +78,42 @@ CREATE TABLE IF NOT EXISTS kv (
     value      TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Other servers' channels, added through the public "Add to Discord" page (OAuth webhook.incoming).
+-- A channel that removes its webhook is deleted here on the next post (Discord answers 404).
+CREATE TABLE IF NOT EXISTS webhooks (
+    id          TEXT PRIMARY KEY,              -- Discord webhook id
+    token       TEXT NOT NULL,                 -- secret: never shown on /status
+    guild_id    TEXT,
+    channel_id  TEXT NOT NULL,
+    role_id     TEXT,                          -- that server's role to @mention on critical alerts
+    manage_hash TEXT NOT NULL,                 -- SHA-256 (hex) of the key in the server's manage link
+    last_ok_at  TEXT,
+    last_error  TEXT,
+    created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_webhooks_channel ON webhooks (channel_id);
+
+-- An alert or digest to send to every subscribed channel: one row per message, one delivery per channel.
+CREATE TABLE IF NOT EXISTS broadcasts (
+    id         TEXT PRIMARY KEY,               -- the event id (alert) | 'digest:<date>'
+    kind       TEXT NOT NULL,                  -- 'alert' | 'digest'
+    payload    TEXT NOT NULL,                  -- the Discord message (JSON); alerts get each server's role at send time
+    nudged_at  TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_broadcasts_created ON broadcasts (created_at);
+
+CREATE TABLE IF NOT EXISTS deliveries (
+    broadcast_id TEXT NOT NULL,
+    webhook_id   TEXT NOT NULL,
+    state        TEXT NOT NULL DEFAULT 'pending', -- 'pending' | 'sent' | 'failed'
+    attempts     INTEGER NOT NULL DEFAULT 0,
+    claim        TEXT,                         -- the queue run sending it now
+    claimed_at   TEXT,
+    last_error   TEXT,
+    created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (broadcast_id, webhook_id)
+);
+CREATE INDEX IF NOT EXISTS idx_deliveries_webhook ON deliveries (webhook_id);
+CREATE INDEX IF NOT EXISTS idx_deliveries_claim   ON deliveries (claim);

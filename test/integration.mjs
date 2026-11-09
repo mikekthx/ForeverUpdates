@@ -21,7 +21,9 @@ const world = {
   geminiModels: [],    // model id of each Gemini call
   // Eval, 2026-10-28: Flash-Lite needs "high" thinking to match Flash; the Flash backup uses "low".
   expectedThinking: { "gemini-3.5-flash-lite": "high", "gemini-3.6-flash": "low" },
-  discordFailNext: 0, discordFailStatus: 500, discordDropReplyNext: 0, discord: [], geminiCalls: []
+  discordFailNext: 0, discordFailStatus: 500, discordDropReplyNext: 0, discord: [], geminiCalls: [],
+  // Other servers' webhooks: the id each message went to (parallel to discord), OAuth codes, deletes.
+  discordTo: [], oauthCodes: {}, oauthExchanges: 0, deletedWebhooks: [], goneWebhooks: new Set(), webhookFail: {}
 };
 
 const siteJson = region => ({
@@ -105,9 +107,26 @@ async function outbound(request) {
     return jsonRes({ candidates: [{ content: { parts: [{ text: JSON.stringify({ results }) }] }, finishReason: "STOP" }] });
   }
   if (host === "discord.com") {
+    if (url.pathname === "/api/v10/oauth2/token") {
+      world.oauthExchanges++;
+      assert.equal(request.method, "POST");
+      assert.equal(request.headers.get("authorization"), `Basic ${btoa("test-client-id:test-client-secret")}`);
+      const form = new URLSearchParams(await request.text());
+      assert.equal(form.get("grant_type"), "authorization_code");
+      assert.equal(form.get("redirect_uri"), "http://localhost/discord/callback");
+      const webhook = world.oauthCodes[form.get("code")];
+      delete world.oauthCodes[form.get("code")]; // a code works once
+      return webhook ? jsonRes({ access_token: "at", token_type: "Bearer", scope: "webhook.incoming", webhook }) : jsonRes({ error: "invalid_grant" }, 400);
+    }
+    const del = url.pathname.match(/^\/api\/v10\/webhooks\/(\d+)\/([\w-]+)$/);
+    if (del && request.method === "DELETE") { world.deletedWebhooks.push(del[1]); return new Response(null, { status: 204 }); }
+    const hookId = url.pathname.match(/^\/api\/webhooks\/(\d+)\//)?.[1];
     const body = await request.json();
+    if (world.goneWebhooks.has(hookId)) return jsonRes({ message: "Unknown Webhook", code: 10015 }, 404);
+    if (world.webhookFail[hookId] > 0) { world.webhookFail[hookId]--; return new Response("bad gateway", { status: 502 }); }
     if (world.discordFailNext > 0) { world.discordFailNext--; return new Response("boom", { status: world.discordFailStatus }); }
     world.discord.push(body);
+    world.discordTo.push(hookId);
     // Discord took the message, but no answer arrives before the bot's 10 s timeout.
     if (world.discordDropReplyNext > 0) { world.discordDropReplyNext--; await new Promise(r => setTimeout(r, 11_000)); }
     return new Response(null, { status: 204 });
@@ -172,6 +191,7 @@ const mf = new Miniflare(convertV4MiniflareOptions({
       compatibilityDate: "2026-10-01",
       d1Databases: { DB: "test-db" },
       bindings: { GEMINI_API_KEY: "test-gemini-key", DISCORD_WEBHOOK_URL: "https://discord.com/api/webhooks/1/abc", ADMIN_TOKEN: "secret-token",
+        DISCORD_CLIENT_ID: "test-client-id", DISCORD_CLIENT_SECRET: "test-client-secret",
         // EU is off by default; these scenarios use it to test US/EU crosspost collapsing.
         FORUM_REGIONS: "us,eu" },
       serviceBindings: {
@@ -917,6 +937,201 @@ try {
   assert.ok(dbg.articleProbe.lines > 3);
   assert.ok(dbg.postProbe.fields.includes("cooked"));
   ok("/status shows counters, pauses and watch list; /debug shows categories and extraction samples");
+
+  {
+    // 15. Other servers: the public "Add to Discord" page (OAuth webhook.incoming), per-server roles, fan-out.
+    const page = async (path, init = {}) => {
+      const res = await mf.dispatchFetch(`http://localhost${path}`, { redirect: "manual", ...init });
+      return { status: res.status, headers: res.headers, text: await res.text() };
+    };
+    const startInstall = async () => {
+      const r = await page("/discord/install");
+      assert.equal(r.status, 302);
+      return { state: new URL(r.headers.get("location")).searchParams.get("state"), cookie: r.headers.get("set-cookie").split(";")[0], r };
+    };
+    const GUILD = "523456789012345678";
+    const hookToken = id => `tok_${id}_${"x".repeat(40)}`;
+    const connect = async ({ webhookId, channelId, guildId = GUILD, install }) => {
+      const code = `code-${webhookId}`;
+      world.oauthCodes[code] = { id: webhookId, token: hookToken(webhookId), channel_id: channelId, guild_id: guildId, type: 1, name: "ForeverUpdates" };
+      const { state, cookie } = install ?? await startInstall();
+      return page(`/discord/callback?code=${code}&state=${state}`, { headers: { Cookie: cookie } });
+    };
+    const form = (fields) => ({ method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(fields).toString() });
+    const hookRow = id => db.prepare("SELECT * FROM webhooks WHERE id = ?").bind(id).first();
+    const sentTo = (id, from = 0) => world.discord.slice(from).filter((m, i) => world.discordTo[from + i] === id);
+
+    {
+      let r = await page("/");
+      assert.equal(r.status, 200);
+      assert.match(r.text, /href="\/discord\/install"/);
+      assert.equal(r.headers.get("referrer-policy"), "no-referrer");
+      assert.match(r.headers.get("content-security-policy"), /default-src 'none'/);
+      const { state, cookie, r: inst } = await startInstall();
+      const loc = new URL(inst.headers.get("location"));
+      assert.equal(`${loc.origin}${loc.pathname}`, "https://discord.com/oauth2/authorize");
+      assert.deepEqual([loc.searchParams.get("client_id"), loc.searchParams.get("scope"), loc.searchParams.get("response_type"), loc.searchParams.get("redirect_uri")],
+        ["test-client-id", "webhook.incoming", "code", "http://localhost/discord/callback"]);
+      assert.match(inst.headers.get("set-cookie"), /^__Host-fu_oauth_state=[\w-]{20,}; Path=\/; Max-Age=600; HttpOnly; Secure; SameSite=Lax$/);
+
+      // The state must match this browser's cookie (no login CSRF); the code isn't even tried otherwise.
+      world.oauthCodes["code-x"] = { id: "300000000000000001", token: hookToken(1), channel_id: "400000000000000001", guild_id: GUILD };
+      const exchanges = world.oauthExchanges;
+      assert.equal((await page(`/discord/callback?code=code-x&state=${state}`)).status, 400, "no cookie");
+      assert.equal((await page(`/discord/callback?code=code-x&state=wrong${state}`, { headers: { Cookie: cookie } })).status, 400, "wrong state");
+      r = await page(`/discord/callback?error=access_denied&state=${state}`, { headers: { Cookie: cookie } });
+      assert.deepEqual([r.status, /Nothing was added/.test(r.text)], [200, true], "cancelled on Discord's page");
+      assert.equal(world.oauthExchanges, exchanges);
+      assert.equal((await page(`/discord/callback?code=nope&state=${state}`, { headers: { Cookie: cookie } })).status, 502, "Discord refuses the code");
+      assert.equal(await db.prepare("SELECT 1 FROM webhooks").first(), null);
+    }
+    ok("public page: Add to Discord asks for webhook.incoming; the callback needs the matching state cookie");
+
+    // Two servers' channels; the first sets a role.
+    const A1 = "310000000000000001", A_CH = "410000000000000001", B = "320000000000000002", B_CH = "420000000000000002", A2 = "330000000000000003";
+    const ROLE = "623456789012345678";
+    let d0 = world.discord.length;
+    let r = await connect({ webhookId: A1, channelId: A_CH });
+    assert.equal(r.status, 303);
+    assert.match(r.headers.get("set-cookie"), /Max-Age=0/, "the state cookie is cleared");
+    const manageA1 = r.headers.get("location");
+    const keyA1 = new URL(manageA1, "http://localhost").searchParams.get("key");
+    assert.match(manageA1, /^\/discord\/manage\?id=310000000000000001&key=[\w-]{40,}&new=1$/);
+    const rowA1 = await hookRow(A1);
+    assert.deepEqual([rowA1.token, rowA1.channel_id, rowA1.guild_id, rowA1.role_id], [hookToken(A1), A_CH, GUILD, null]);
+    assert.ok(rowA1.manage_hash && !rowA1.manage_hash.includes(keyA1), "only the key's hash is stored");
+    const welcome = sentTo(A1, d0);
+    assert.equal(welcome.length, 1);
+    assert.match(welcome[0].embeds[0].title, /set up in this channel/);
+    assert.deepEqual(welcome[0].allowed_mentions, { parse: [] });
+    r = await page(manageA1);
+    assert.deepEqual([r.status, /This channel is set up/.test(r.text), r.text.includes(`discord.com/channels/${GUILD}/${A_CH}`)], [200, true, true]);
+    assert.equal((await page(`/discord/manage?id=${A1}&key=wrong`)).status, 404);
+    assert.equal((await page(`/discord/manage?id=${A1}`)).status, 404);
+
+    d0 = world.discord.length;
+    r = await page("/discord/manage", form({ id: A1, key: keyA1, action: "role", role: "Raiders" }));
+    assert.deepEqual([r.status, /isn't a role ID/.test(r.text), world.discord.length], [400, true, d0], "a bad role is refused; nothing posted");
+    r = await page("/discord/manage", form({ id: A1, key: "wrong", action: "role", role: ROLE }));
+    assert.equal(r.status, 404, "the key is needed to change it");
+    r = await page("/discord/manage", form({ id: A1, key: keyA1, action: "role", role: GUILD }));
+    assert.equal(r.status, 400, "@everyone (the server's own ID) is refused");
+    r = await page("/discord/manage", form({ id: A1, key: keyA1, action: "role", role: `<@&${ROLE}>` }));
+    assert.equal(r.status, 303);
+    assert.match(r.headers.get("location"), /&saved=1$/);
+    assert.equal((await hookRow(A1)).role_id, ROLE);
+    const notice = sentTo(A1, d0);
+    assert.equal(notice.length, 1);
+    assert.match(notice[0].content, new RegExp(`<@&${ROLE}>`));
+    assert.deepEqual(notice[0].allowed_mentions, { parse: [] }, "showing the role doesn't ping it");
+    assert.equal((await connect({ webhookId: B, channelId: B_CH, guildId: "723456789012345678" })).status, 303);
+
+    // The same channel added again: its earlier webhook is deleted and replaced, keeping the role.
+    r = await connect({ webhookId: A2, channelId: A_CH });
+    assert.equal(r.status, 303);
+    const keyA2 = new URL(r.headers.get("location"), "http://localhost").searchParams.get("key");
+    assert.ok(world.deletedWebhooks.includes(A1));
+    assert.equal(await hookRow(A1), null);
+    assert.equal((await hookRow(A2)).role_id, ROLE);
+    assert.equal((await page(manageA1)).status, 404, "the old manage link stops working");
+    let st = await call("/status");
+    assert.equal(st.body.subscribers.channels, 2);
+    assert.ok(!JSON.stringify(st.body).includes("tok_"), "/status never shows webhook tokens");
+    ok("public page: a channel is added from Discord's answer, sets its own role, and re-adding it replaces it");
+
+    // A critical alert reaches the owner and both servers, each with its own role (or none).
+    world.geminiMode = "ok"; world.geminiModelMode = {}; await ai("ok");
+    await db.prepare("DELETE FROM kv WHERE key LIKE 'pause:%'").run();
+    d0 = world.discord.length;
+    world.usTracker = [...world.usTracker, forumPost({ region: "us", categoryId: 348, title: "Emergency realm restarts", text: "Realms are offline for an emergency restart.", topicId: 9101 })];
+    await poll(); await settle();
+    const owner1 = sentTo("1", d0).filter(m => m.embeds?.[0]?.title?.includes("Emergency realm restarts"));
+    const a1 = sentTo(A2, d0), b1 = sentTo(B, d0);
+    assert.deepEqual([owner1.length, a1.length, b1.length], [1, 1, 1]);
+    assert.deepEqual(a1[0].embeds, owner1[0].embeds, "the same alert");
+    assert.deepEqual([a1[0].content, a1[0].allowed_mentions], [`<@&${ROLE}>`, { parse: [], roles: [ROLE] }], "server A pings its role");
+    assert.deepEqual([b1[0].content, b1[0].allowed_mentions], [undefined, { parse: [] }], "server B has no role");
+    assert.deepEqual([owner1[0].content, owner1[0].allowed_mentions], [undefined, { parse: [] }], "the owner's role setting is its own");
+    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM deliveries WHERE state = 'sent'").first()).n, 2);
+    await poll(); await settle();
+    assert.equal(world.discord.length, d0 + 3, "nothing is sent twice");
+    ok("fan-out: a critical alert goes to every server's channel, each with its own role");
+
+    // Server B deleted the webhook (404): that channel is forgotten. Server A's Discord fails once: its
+    // delivery stays pending and the sweeper restarts it once its claim has expired.
+    world.goneWebhooks.add(B);
+    world.webhookFail[A2] = 1;
+    d0 = world.discord.length;
+    world.usTracker = [...world.usTracker, forumPost({ region: "us", categoryId: 348, title: "Login queue update", text: "Login queues are back after the restart.", topicId: 9102 })];
+    await poll(); await settle();
+    assert.equal(await hookRow(B), null, "a deleted webhook removes the channel");
+    assert.equal(sentTo(A2, d0).length, 0);
+    const pendingA = await db.prepare("SELECT * FROM deliveries WHERE webhook_id = ?").bind(A2).all();
+    assert.deepEqual(pendingA.results.map(x => [x.state, x.attempts]).filter(([s]) => s === "pending"), [["pending", 1]]);
+    assert.match(pendingA.results.find(x => x.state === "pending").last_error, /502/);
+    await poll(); await settle();
+    assert.equal(sentTo(A2, d0).length, 0, "not again while its claim holds");
+    await db.prepare("UPDATE deliveries SET claimed_at = datetime('now', '-10 minutes') WHERE state = 'pending'").run();
+    await db.prepare("UPDATE broadcasts SET nudged_at = datetime('now', '-30 minutes')").run();
+    await poll(); await settle();
+    assert.equal(sentTo(A2, d0).length, 1, "the sweeper restarted it");
+    assert.match(sentTo(A2, d0)[0].embeds[0].title, /Login queue update/);
+    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM deliveries WHERE state = 'pending'").first()).n, 0);
+    ok("fan-out: a removed webhook drops its channel; a failed post is retried after its claim expires");
+
+    // The digest goes to every channel too, once a day, without pinging.
+    await db.prepare("DELETE FROM kv WHERE key IN ('digest:last', 'digest:inflight')").run();
+    world.usTracker = [...world.usTracker, forumPost({ region: "us", categoryId: 348, title: "Thanks for the Skyborne feedback", text: "We read every post. Thank you!", topicId: 9103 })];
+    await poll(); await settle();
+    d0 = world.discord.length;
+    await poll(pt("17:05")); await settle();
+    const ownerDigest = sentTo("1", d0).filter(m => /updates? today$/.test(m.content ?? ""));
+    const aDigest = sentTo(A2, d0);
+    assert.deepEqual([ownerDigest.length, aDigest.length], [1, 1]);
+    assert.deepEqual([aDigest[0].content, aDigest[0].embeds], [ownerDigest[0].content, ownerDigest[0].embeds]);
+    assert.deepEqual(aDigest[0].allowed_mentions, { parse: [] }, "the digest never pings");
+    assert.equal((await db.prepare("SELECT state FROM deliveries WHERE broadcast_id = ?").bind(`digest:${digestToday}`).first())?.state, "sent");
+    await poll(pt("17:10")); await settle();
+    assert.equal(sentTo(A2, d0).length, 1, "one digest a day");
+    ok("fan-out: the daily digest goes to every channel once, without pings");
+
+    // Remove from the manage page: the webhook is deleted on Discord too.
+    r = await page("/discord/manage", form({ id: A2, key: keyA2, action: "remove" }));
+    assert.deepEqual([r.status, /Removed/.test(r.text)], [200, true]);
+    assert.ok(world.deletedWebhooks.includes(A2));
+    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM webhooks").first()).n, 0);
+    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM deliveries").first()).n, 0);
+    ok("public page: Remove deletes the webhook and forgets the channel");
+
+    // More channels than one queue message posts to (FANOUT_PER_MESSAGE = 20): the parts chain.
+    await db.prepare(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 45)
+      INSERT INTO webhooks (id, token, channel_id, manage_hash) SELECT printf('35%016d', i), printf('tok_%040d', i), printf('45%016d', i), 'h' FROM n`).run();
+    d0 = world.discord.length;
+    world.usTracker = [...world.usTracker, forumPost({ region: "us", categoryId: 348, title: "Emergency maintenance tonight", text: "Realms go offline for emergency maintenance.", topicId: 9104 })];
+    await poll();
+    const fanStats = await settle();
+    const many = world.discordTo.slice(d0).filter(id => id?.startsWith("35"));
+    assert.deepEqual([many.length, new Set(many).size], [45, 45], "every channel once");
+    assert.ok(fanStats.work >= 3, "three fanout messages (20 + 20 + 5)");
+    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM deliveries WHERE state = 'sent'").first()).n, 45);
+    assert.ok((await call("/status")).body.today["fanout:alert"] >= 45);
+    await db.prepare("DELETE FROM webhooks").run();
+    await db.prepare("DELETE FROM deliveries").run();
+    ok("fan-out: 45 channels are reached over chained queue messages, each once");
+
+    // Full: no new sign-ups, and a webhook created anyway (sign-up started before) is deleted.
+    const early = await startInstall();
+    await db.prepare(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100)
+      INSERT INTO webhooks (id, token, channel_id, manage_hash) SELECT printf('9%017d', i), 'x', printf('8%017d', i), 'h' FROM n`).run();
+    assert.match((await page("/")).text, /Sign-ups are closed/);
+    assert.equal((await page("/discord/install")).status, 503);
+    r = await connect({ webhookId: "340000000000000004", channelId: "440000000000000004", install: early });
+    assert.equal(r.status, 503);
+    assert.ok(world.deletedWebhooks.includes("340000000000000004"));
+    assert.equal(await hookRow("340000000000000004"), null);
+    await db.prepare("DELETE FROM webhooks").run();
+    ok("public page: sign-ups stop at MAX_SUBSCRIBERS");
+  }
 
   console.log(`\n${passed} integration scenarios passed`);
 } finally {

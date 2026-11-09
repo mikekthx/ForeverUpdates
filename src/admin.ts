@@ -10,6 +10,7 @@ import { geminiModels, geminiPauseKey } from "./llm/chain";
 import { articleProbe, extractArticleFullText, extractArticleTitle } from "./lib/news";
 import { postIdFromKey, runPoll, seededKey } from "./poller";
 import { collectSources, forumRegions, resolveAllCategories } from "./sources";
+import { publicPagesEnabled } from "./subscribe";
 import type { Env } from "./types";
 
 const ROUTES = ["/status", "/debug", "/seed", "/run-poll", "/run-digest"];
@@ -46,13 +47,18 @@ function json(data: unknown): Response {
 async function status(env: Env) {
   const db = env.DB;
   const today = new Date().toISOString().slice(0, 10);
-  const [health, counters, watched, recent] = await db.batch<any>([
+  const [health, counters, watched, recent, subscribers, channels] = await db.batch<any>([
     db.prepare("SELECT * FROM source_health ORDER BY source"),
     db.prepare("SELECT key, value FROM kv WHERE key LIKE ? ORDER BY key").bind(`count:${today}:%`),
     db.prepare(`SELECT key, watch_tier, title, checked_at, watch_until FROM documents WHERE watch_tier > 0 AND watch_until > datetime('now')
                 ORDER BY watch_tier DESC, checked_at ASC LIMIT 50`),
     db.prepare(`SELECT id, title, kind, state, classified_by, relevant, critical, alert_state, digest_state, created_at
-                FROM events ORDER BY created_at DESC LIMIT 20`)
+                FROM events ORDER BY created_at DESC LIMIT 20`),
+    db.prepare(`SELECT (SELECT COUNT(*) FROM webhooks) AS channels,
+                       (SELECT COUNT(*) FROM deliveries WHERE state = 'pending') AS pendingDeliveries,
+                       (SELECT COUNT(*) FROM deliveries WHERE state = 'failed' AND created_at > datetime('now', '-1 day')) AS failedLastDay`),
+    // Never the tokens or manage keys.
+    db.prepare(`SELECT id, guild_id, channel_id, role_id, last_ok_at, last_error, created_at FROM webhooks ORDER BY created_at DESC LIMIT 50`)
   ]);
   const gemini = geminiModels(env);
   const seedFlag = seededKey(forumRegions(env));
@@ -73,6 +79,8 @@ async function status(env: Env) {
       workersAiPausedUntil: pausedUntil("pause:workers-ai"), workersAiBound: !!env.AI },
     today: Object.fromEntries((counters.results ?? []).map((r: any) => [r.key.split(":").slice(2).join(":"), Number(r.value)])),
     stuck: await backlog(db),
+    // Other servers' channels (the public "Add to Discord" page).
+    subscribers: { publicPage: publicPagesEnabled(env), ...(subscribers.results?.[0] ?? {}), recent: channels.results },
     sources: health.results,
     watching: watched.results,
     recentEvents: recent.results

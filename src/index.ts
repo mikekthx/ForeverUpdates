@@ -7,6 +7,9 @@
  *                  ├─ sweeper (re-queues stuck work)                          └─ relevant → daily digest
  *                  ├─ daily digest (after 5 PM Pacific)
  *                  └─ health warnings
+ *
+ * Alerts and digests also go to other servers' channels added on the public "Add to Discord" page
+ * (src/subscribe.ts), through WORK queue "fanout" messages (src/fanout.ts).
  */
 
 import { handleAdmin } from "./admin";
@@ -14,6 +17,7 @@ import { handleClassifyBatch } from "./classify";
 import { maybeSendDigest } from "./digest";
 import { warnIfUnhealthy } from "./health";
 import { runPoll } from "./poller";
+import { handlePublic } from "./subscribe";
 import type { ClassifyMessage, Env, WorkMessage } from "./types";
 import { handleWorkBatch } from "./work";
 
@@ -41,7 +45,7 @@ export default {
     else await handleWorkBatch(batch as MessageBatch<WorkMessage>, env);
   },
 
-  fetch(request: Request, env: Env): Promise<Response> {
-    return handleAdmin(request, env);
+  async fetch(request: Request, env: Env): Promise<Response> {
+    return (await handlePublic(request, env)) ?? handleAdmin(request, env);
   }
 };

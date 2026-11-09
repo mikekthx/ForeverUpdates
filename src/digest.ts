@@ -1,8 +1,9 @@
 /** Daily digest of relevant, non-critical events. Sent by the 5-minute cron once it's due. */
 
-import { DIGEST_HOUR, DIGEST_MAX_ITEMS, DIGEST_TIME_ZONE, DOC_RETENTION_DAYS, EVENT_RETENTION_DAYS } from "./config";
+import { BROADCAST_RETENTION_DAYS, DIGEST_HOUR, DIGEST_MAX_ITEMS, DIGEST_TIME_ZONE, DOC_RETENTION_DAYS, EVENT_RETENTION_DAYS } from "./config";
 import { kvGet, placeholders } from "./db";
 import { DiscordError, postDiscord } from "./discord";
+import { broadcastStmts, startFanout } from "./fanout";
 import { DigestRow, buildDigestMessage } from "./lib/discord";
 import { UPDATE_MARKER } from "./lib/diff";
 import { clipMarkdown } from "./lib/markdown";
@@ -101,12 +102,21 @@ async function sendDigest(env: Env, name: string): Promise<{ sent: number; busy?
 
     const rows = await loadRows(db, ids.slice(0, DIGEST_MAX_ITEMS));
     const { payload } = buildDigestMessage(rows, { extra: ids.length - rows.length });
-    // "preparing" → "posting", only if this run still holds the row.
-    const moved = await db.prepare(
-      `UPDATE kv SET value = ?, updated_at = datetime('now')
-       WHERE key = ? AND json_extract(value, '$.owner') = ? AND json_extract(value, '$.state') = 'preparing'`
-    ).bind(mine("posting", ids), IN_FLIGHT_KEY, owner).run();
+    // "preparing" → "posting", only if this run still holds the row. In the same batch, and only if
+    // that worked, the digest is stored for other servers' channels: one per channel per day.
+    const posting = {
+      sql: `EXISTS (SELECT 1 FROM kv WHERE key = ? AND json_extract(value, '$.owner') = ? AND json_extract(value, '$.state') = 'posting')`,
+      binds: [IN_FLIGHT_KEY, owner]
+    };
+    const [moved, , fanned] = await db.batch([
+      db.prepare(
+        `UPDATE kv SET value = ?, updated_at = datetime('now')
+         WHERE key = ? AND json_extract(value, '$.owner') = ? AND json_extract(value, '$.state') = 'preparing'`
+      ).bind(mine("posting", ids), IN_FLIGHT_KEY, owner),
+      ...broadcastStmts(db, `digest:${name}`, "digest", payload, posting)
+    ]);
     if (!moved.meta?.changes) return { sent: 0, busy: true }; // another run took over: it sends instead
+    if ((fanned.meta?.changes ?? 0) > 0) await startFanout(env, [`digest:${name}`]);
 
     mayHavePosted = true;
     try {
@@ -202,6 +212,9 @@ async function prune(db: D1Database): Promise<void> {
     ).bind(`-${DOC_RETENTION_DAYS} days`),
     // Watched documents past their window: drop the stored text, keep the row.
     db.prepare(`UPDATE documents SET watch_tier = 0, body = NULL WHERE watch_tier > 0 AND watch_until < datetime('now')`),
-    db.prepare(`DELETE FROM kv WHERE key LIKE 'count:%' AND updated_at < datetime('now', '-30 days')`)
+    db.prepare(`DELETE FROM kv WHERE key LIKE 'count:%' AND updated_at < datetime('now', '-30 days')`),
+    // Other servers' alerts and digests: only the last day is ever retried.
+    db.prepare(`DELETE FROM deliveries WHERE broadcast_id IN (SELECT id FROM broadcasts WHERE created_at < datetime('now', ?))`).bind(`-${BROADCAST_RETENTION_DAYS} days`),
+    db.prepare(`DELETE FROM broadcasts WHERE created_at < datetime('now', ?)`).bind(`-${BROADCAST_RETENTION_DAYS} days`)
   ]);
 }

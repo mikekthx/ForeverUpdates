@@ -6,6 +6,7 @@
 
 import { HOTFIX_TITLE, NUDGE_AFTER_MIN, NUDGE_PER_RUN, RECOVERY_MAX_FETCHES, OPERATIONAL_TITLE, REGIONS, WATCH_PROBES_PER_RUN, WATCH_TIERS } from "./config";
 import { kvGetMany, kvSet, placeholders, sqlTime } from "./db";
+import { staleBroadcastsStmt } from "./fanout";
 import { recordHealth } from "./health";
 import { errMessage, getHtml, getJson } from "./http";
 import { articleProbe } from "./lib/news";
@@ -163,7 +164,7 @@ async function probeWatched(db: D1Database): Promise<{ checked: number; changed:
 
 async function collectNudges(db: D1Database): Promise<{ work: WorkMessage[]; classify: string[] }> {
   const stale = `datetime('now', '-${NUDGE_AFTER_MIN} minutes')`;
-  const [docs, events, alerts] = await db.batch<any>([
+  const [docs, events, alerts, broadcasts] = await db.batch<any>([
     db.prepare(
       `SELECT key, status FROM documents
        WHERE (status = 'new'
@@ -179,11 +180,13 @@ async function collectNudges(db: D1Database): Promise<{ work: WorkMessage[]; cla
       `SELECT id FROM events
        WHERE alert_state = 'pending' AND created_at > datetime('now', '-1 day')
          AND (nudged_at IS NULL OR nudged_at < ${stale})
-       LIMIT ?`).bind(NUDGE_PER_RUN)
+       LIMIT ?`).bind(NUDGE_PER_RUN),
+    staleBroadcastsStmt(db, NUDGE_PER_RUN)
   ]);
   const work: WorkMessage[] = [
     ...(docs.results ?? []).map((r: any) => ({ t: "fetch" as const, key: r.key, baseline: r.status === "seeded" || undefined })),
-    ...(alerts.results ?? []).map((r: any) => ({ t: "deliver" as const, id: r.id }))
+    ...(alerts.results ?? []).map((r: any) => ({ t: "deliver" as const, id: r.id })),
+    ...(broadcasts.results ?? []).map((r: any) => ({ t: "fanout" as const, id: r.id }))
   ];
   const classify = (events.results ?? []).map((r: any) => r.id as string);
 
@@ -192,6 +195,8 @@ async function collectNudges(db: D1Database): Promise<{ work: WorkMessage[]; cla
   const eventIds = [...classify, ...(alerts.results ?? []).map((r: any) => r.id)];
   if (docKeys.length) marks.push(db.prepare(`UPDATE documents SET nudged_at = datetime('now') WHERE key IN (${placeholders(docKeys.length)})`).bind(...docKeys));
   if (eventIds.length) marks.push(db.prepare(`UPDATE events SET nudged_at = datetime('now') WHERE id IN (${placeholders(eventIds.length)})`).bind(...eventIds));
+  const broadcastIds = (broadcasts.results ?? []).map((r: any) => r.id);
+  if (broadcastIds.length) marks.push(db.prepare(`UPDATE broadcasts SET nudged_at = datetime('now') WHERE id IN (${placeholders(broadcastIds.length)})`).bind(...broadcastIds));
   if (marks.length) await db.batch(marks);
   return { work, classify };
 }

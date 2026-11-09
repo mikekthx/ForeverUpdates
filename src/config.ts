@@ -100,3 +100,17 @@ export const HEALTH_MAX_FAILURES = 12;        // 1 hour of consecutive errors
 export const HEALTH_MAX_EMPTY = 6;            // 30 minutes of zero items
 export const HEALTH_WARN_COOLDOWN_HOURS = 6;
 export const BACKLOG_WARN_MIN = 60;           // work stuck longer than this → warning
+
+// ── Other servers (Discord OAuth "Add to Discord"; on when DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET are set) ──
+export const DISCORD_API = "https://discord.com/api/v10";
+/** Channels that can sign up. Each alert or digest costs one Discord request per channel (Workers
+ * Free: 50 per invocation, so they're spread over queue messages of FANOUT_PER_MESSAGE). */
+export const MAX_SUBSCRIBERS = 100;
+export const FANOUT_PER_MESSAGE = 20;
+/** A claimed delivery that's still pending this long later is claimed again (each post times out in 10 s). */
+export const FANOUT_LEASE_MIN = 3;
+export const FANOUT_MAX_ATTEMPTS = 8;
+/** Stored alert/digest messages for other servers; only the last day is ever retried. */
+export const BROADCAST_RETENTION_DAYS = 7;
+/** How long the "Add to Discord" round trip may take. */
+export const OAUTH_STATE_MAX_AGE_SEC = 600;

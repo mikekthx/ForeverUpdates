@@ -6,6 +6,8 @@ import { parseNewsListing, extractArticleTitle, titleFromSlug, extractArticleFul
 import { markAddedLines, updateFocus, UPDATE_MARKER } from "../src/lib/diff.ts";
 import { pickForeverCategories, flattenCategoryList, parseTracker, parseSearch, newsPointerArticleId, postText, isNewsCopyExcerpt } from "../src/lib/forum.ts";
 import { heuristicClassify, sanitizeClassification } from "../src/lib/classify.ts";
+import { parseRoleInput, readOAuthWebhook, roleNoticePayload, welcomePayload, withRole, webhookUrl } from "../src/lib/discord.ts";
+import { htmlEscape, landingPage, managePage, messagePage } from "../src/lib/pages.ts";
 import { buildDigestMessage, buildAlertPayload, cutAtSentence, shortLink, embedTextLength, DISCORD_EMBED_TOTAL_LIMIT, DIGEST_BLUE_POST_COLOR, DIGEST_NEWS_COLOR, ALERT_COLOR } from "../src/lib/discord.ts";
 import { fingerprintNew, fingerprintEdit } from "../src/lib/fingerprint.ts";
 import { initialWatchTier } from "../src/poller.ts";
@@ -811,6 +813,62 @@ ok("geminiModels: the configured order, each model with its own settings");
   assert.deepEqual(digestClock(new Date("2026-07-01T00:00:00Z")), { date: "2026-06-30", hour: 17 }, "PDT: 5 PM");
   assert.deepEqual(digestClock(new Date("2026-07-01T07:00:00Z")), { date: "2026-07-01", hour: 0 }, "PDT: midnight starts the next day");
   ok("digestClock: Pacific date and hour, either side of daylight saving");
+}
+
+// Other servers' channels: each gets the alert with its own role, and nothing else can be mentioned.
+{
+  const base = buildAlertPayload({ title: "Queues", url: "https://e/x", content: "Login queues are long.", summary: "" }, {});
+  const pinged = withRole(base, "223456789012345678") as any;
+  assert.equal(pinged.content, "<@&223456789012345678>");
+  assert.deepEqual(pinged.allowed_mentions, { parse: [], roles: ["223456789012345678"] });
+  assert.deepEqual(pinged.embeds, (base as any).embeds, "the same alert");
+  assert.deepEqual((withRole(base, null) as any).allowed_mentions, { parse: [] });
+  assert.equal((withRole(base, null) as any).content, undefined);
+  assert.deepEqual((withRole({ content: "3 updates today", allowed_mentions: { parse: ["everyone"] } }, null) as any).allowed_mentions, { parse: [] }, "always replaced");
+  assert.equal((withRole({ content: "Heads up" }, "223456789012345678") as any).content, "<@&223456789012345678> Heads up");
+  assert.deepEqual((withRole(base, "@everyone") as any).allowed_mentions, { parse: [] });
+
+  assert.deepEqual(parseRoleInput("  223456789012345678 "), { ok: true, roleId: "223456789012345678" });
+  assert.deepEqual(parseRoleInput("<@&223456789012345678>"), { ok: true, roleId: "223456789012345678" });
+  assert.deepEqual(parseRoleInput("@223456789012345678"), { ok: true, roleId: "223456789012345678" });
+  assert.deepEqual(parseRoleInput(""), { ok: true, roleId: null }, "empty clears the role");
+  assert.deepEqual(parseRoleInput("@everyone"), { ok: false });
+  assert.deepEqual(parseRoleInput("Raiders"), { ok: false });
+  assert.deepEqual(parseRoleInput("<@223456789012345678>"), { ok: false }, "a user mention isn't a role");
+  assert.deepEqual(parseRoleInput("123456789012345678", "123456789012345678"), { ok: false }, "the server's own ID is @everyone");
+
+  const token = "a".repeat(68);
+  assert.deepEqual(readOAuthWebhook({ id: "323456789012345678", token, channel_id: "423456789012345678", guild_id: "523456789012345678", type: 1 }),
+    { id: "323456789012345678", token, channelId: "423456789012345678", guildId: "523456789012345678" });
+  assert.equal(readOAuthWebhook({ id: "323456789012345678", token, channel_id: "423456789012345678" })?.guildId, null);
+  assert.equal(readOAuthWebhook(null), null);
+  assert.equal(readOAuthWebhook({ id: "323456789012345678", token: "a/../b" + token, channel_id: "423456789012345678" }), null, "a token can't change the URL");
+  assert.equal(readOAuthWebhook({ id: "1/2", token, channel_id: "423456789012345678" }), null);
+  assert.equal(webhookUrl("323456789012345678", token), `https://discord.com/api/webhooks/323456789012345678/${token}`);
+
+  for (const p of [welcomePayload("5 PM Pacific"), roleNoticePayload("223456789012345678"), roleNoticePayload(null)] as any[]) {
+    assert.deepEqual(p.allowed_mentions, { parse: [] }, "set-up messages never ping");
+  }
+  assert.match(roleNoticePayload("223456789012345678").content as string, /<@&223456789012345678>/);
+  ok("subscriber channels: withRole, role input, OAuth webhook check, set-up messages never ping");
+}
+
+// Public pages: everything interpolated is escaped; no scripts.
+{
+  assert.equal(htmlEscape(`<a href="x">'&'</a>`), "&lt;a href=&quot;x&quot;&gt;&#39;&amp;&#39;&lt;/a&gt;");
+  const land = landingPage({ full: false, digestTime: "5 PM Pacific" });
+  assert.match(land, /href="\/discord\/install"/);
+  assert.doesNotMatch(landingPage({ full: true, digestTime: "5 PM Pacific" }), /\/discord\/install/, "no button when full");
+  const page = managePage({
+    id: "323456789012345678", key: `k"><script>`, guildId: "523456789012345678", channelId: "423456789012345678", roleId: null,
+    lastOkAt: null, lastError: `<img src=x onerror=alert(1)>`, notice: "bad-role", roleInput: `"><script>alert(1)</script>`
+  });
+  assert.doesNotMatch(page, /<script|<img/);
+  assert.match(page, /value="k&quot;&gt;&lt;script&gt;"/);
+  assert.match(page, /https:\/\/discord\.com\/channels\/523456789012345678\/423456789012345678/);
+  assert.doesNotMatch(messagePage("<b>", "<i>", { href: `"x`, label: "<u>" }), /<b>|<i>|<u>|href=""x"/);
+  for (const html of [land, page]) assert.doesNotMatch(html, /<script/);
+  ok("public pages: escaped values, no scripts, no install button when full");
 }
 
 console.log(`\n${n} test groups passed`);

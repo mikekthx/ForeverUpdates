@@ -59,14 +59,49 @@ export function shortLink(url: string): string {
     .replace(/^(https:\/\/news\.blizzard\.com\/[a-z]{2}-[a-z]{2}\/article\/\d+)\/[^/?#]+$/i, "$1");
 }
 const linkText = (title: string) => escapeMarkdown(clip(title.replace(/[[\]]/g, "").replace(/\s+/g, " ").trim(), 200));
-/** A Discord role ID (a snowflake); anything else is ignored rather than sent. */
-const ROLE_ID_RE = /^\d{17,20}$/;
+/** A Discord ID (a snowflake), e.g. a role's; anything else is ignored rather than sent. */
+const SNOWFLAKE_RE = /^\d{17,20}$/;
+const ROLE_ID_RE = SNOWFLAKE_RE;
+
+/**
+ * Adds the @mention of `roleId` to a message, allowing exactly that mention. Without a valid role
+ * the message can mention no one. Either way forum/LLM text can never trigger @everyone or pings.
+ */
+export function withRole(payload: Record<string, unknown>, roleId?: string | null): Record<string, unknown> {
+  const id = roleId?.trim() ?? "";
+  if (!ROLE_ID_RE.test(id)) return { ...payload, allowed_mentions: { parse: [] } };
+  const content = typeof payload.content === "string" && payload.content ? `<@&${id}> ${payload.content}` : `<@&${id}>`;
+  return { ...payload, content, allowed_mentions: { parse: [], roles: [id] } };
+}
+
+/**
+ * A role as a person enters it on the manage page: its ID, or the `<@&ID>` Discord gives for
+ * `\@Role`. Empty clears it. A server's own ID is its @everyone role, which is never allowed.
+ */
+export function parseRoleInput(input: string, guildId?: string | null): { ok: true; roleId: string | null } | { ok: false } {
+  const s = input.trim();
+  if (!s) return { ok: true, roleId: null };
+  const m = s.match(/^<@&(\d{17,20})>$/) ?? s.match(/^@?(\d{17,20})$/);
+  if (!m || m[1] === guildId) return { ok: false };
+  return { ok: true, roleId: m[1] };
+}
+
+export interface OAuthWebhook { id: string; token: string; channelId: string; guildId: string | null }
+
+/** The `webhook` object of an OAuth token response (scope webhook.incoming), checked; null if it isn't one. */
+export function readOAuthWebhook(w: any): OAuthWebhook | null {
+  const id = String(w?.id ?? ""), token = String(w?.token ?? ""), channelId = String(w?.channel_id ?? "");
+  if (!SNOWFLAKE_RE.test(id) || !/^[\w-]{20,200}$/.test(token) || !SNOWFLAKE_RE.test(channelId)) return null;
+  const guildId = SNOWFLAKE_RE.test(String(w?.guild_id ?? "")) ? String(w.guild_id) : null;
+  return { id, token, channelId, guildId };
+}
+
+export const webhookUrl = (id: string, token: string) => `https://discord.com/api/webhooks/${id}/${token}`;
 
 export function buildAlertPayload(
   item: { title: string; url: string; content: string; summary: string },
   opts: { roleId?: string }
 ): Record<string, unknown> {
-  const roleId = ROLE_ID_RE.test(opts.roleId?.trim() ?? "") ? opts.roleId!.trim() : undefined;
   // A Discord quote ends at a line break, so the TL;DR is kept to one line.
   const summary = item.summary?.replace(/\s+/g, " ").trim();
   const tldr = summary ? `> **TL;DR:** ${escapeMarkdown(summary)}\n\n` : "";
@@ -80,12 +115,10 @@ export function buildAlertPayload(
   // The title already links to the post; an absurdly long URL just isn't repeated.
   const more = post.cut && item.url.length <= 400 ? `\n[Read the full post](${linkUrl(item.url)})` : "";
   const description = clip(`${tldr}${watch}${post.text}${more}`.trim(), EMBED_DESCRIPTION_LIMIT);
-  return {
-    content: roleId ? `<@&${roleId}>` : undefined,
-    // Never let forum/LLM text trigger @everyone or user pings; only the configured role.
-    allowed_mentions: roleId ? { parse: [], roles: [roleId] } : { parse: [] },
+  // Only the configured role can be mentioned (see withRole).
+  return withRole({
     embeds: [{ title: clip(`🚨 ${item.title}`, 256), url: item.url, description: description || escapeMarkdown(clip(item.title, 256)), color: ALERT_COLOR }]
-  };
+  }, opts.roleId);
 }
 
 /**
@@ -207,4 +240,24 @@ export function embedTextLength(embed: any): number {
   let n = (embed.title ?? "").length + (embed.description ?? "").length + (embed.footer?.text ?? "").length;
   for (const f of embed.fields ?? []) n += (f.name ?? "").length + (f.value ?? "").length;
   return n;
+}
+
+/** Posted once to a channel that was just added on the public page. */
+export function welcomePayload(digestTime: string): Record<string, unknown> {
+  return {
+    allowed_mentions: { parse: [] },
+    embeds: [{
+      title: "ForeverUpdates is set up in this channel",
+      description: `Urgent WoW: Forever news (hotfixes, known issues, maintenance, launch problems) will be posted here right away, and a digest of everything else that's relevant every day at ${escapeMarkdown(digestTime)}.\n\nTo stop, delete this webhook in the channel's settings (Integrations → Webhooks).`,
+      color: DIGEST_BLUE_POST_COLOR
+    }]
+  };
+}
+
+/** Shows which role urgent alerts will ping, without pinging it (no mentions allowed). */
+export function roleNoticePayload(roleId: string | null): Record<string, unknown> {
+  return {
+    content: roleId ? `Urgent ForeverUpdates alerts in this channel will ping <@&${roleId}>.` : "Urgent ForeverUpdates alerts in this channel will no longer ping a role.",
+    allowed_mentions: { parse: [] }
+  };
 }

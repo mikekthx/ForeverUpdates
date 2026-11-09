@@ -78,6 +78,35 @@ What to look for in `/debug`:
 
 The other admin routes are `/run-poll`, `/run-digest` (sends today's digest now) and `/seed`. For live logs, run `npx wrangler tail`.
 
+## Let other servers add it (optional)
+
+The Worker can also serve a public page where anyone can add the alerts to a channel in their own Discord server. It uses Discord's `webhook.incoming` OAuth scope: the person picks a server and channel on Discord's own page, Discord creates a webhook there, and the Worker stores it. No bot joins the server, and the Worker can't read anything in it.
+
+Each added channel gets the same alerts and daily digest as yours. Each server can set its own role to ping on urgent alerts. Your own channel (`DISCORD_WEBHOOK_URL`) works as before, and health warnings go only to it.
+
+1. **Create a Discord application** at <https://discord.com/developers/applications>. Its name and icon are what people see on Discord's page and on the webhook's posts.
+2. **Add the redirect.** Under **OAuth2 → Redirects**, add `https://forever-updates.<your-subdomain>.workers.dev/discord/callback`. It must match exactly.
+3. **Set the two secrets.** Both are on the application's **OAuth2** page.
+
+   ```powershell
+   npx wrangler secret put DISCORD_CLIENT_ID
+   npx wrangler secret put DISCORD_CLIENT_SECRET
+   ```
+
+4. **Add the new tables** to an existing database (the schema only creates what's missing), then deploy:
+
+   ```powershell
+   npx wrangler d1 execute forever-updates --remote --file=./schema.sql
+   npx wrangler deploy
+   ```
+
+Share `https://forever-updates.<your-subdomain>.workers.dev/`. After adding a channel, the person lands on that channel's settings page: a role to ping on urgent alerts, and **Remove**. Its address holds a secret key, so they should bookmark it. Adding the same channel again replaces its webhook and gives a new settings link (the role is kept).
+
+- A server that deletes the webhook in Discord is dropped on the next post.
+- `/status` shows the channels (never their tokens) under `subscribers`.
+- Sign-ups stop at `MAX_SUBSCRIBERS` (100) in `src/config.ts`. Each alert and digest costs one Discord request per channel, sent 20 at a time in work-queue messages, so 100 channels add about 5 queue messages per alert.
+- Without the two secrets, the page is off and `/` answers as before.
+
 ## Configuration
 
 Everything you can tune is in `src/config.ts`: the title filters, the watch tiers, the digest time and time zone, and the retry and retention limits.
@@ -117,7 +146,7 @@ To score the prompt:
 - **CPU time.** Cloudflare's free plan gives 10 ms of CPU per request. In production, a cold run that fetches a large news article has measured up to about 70 ms. Even so, Cloudflare reported no CPU-limit errors.
   - Check this in the dashboard: Metrics, then **Exceeded CPU Time Limits**.
   - If those errors ever appear, Workers Paid lifts the limit.
-- **One Discord channel.** Every alert, digest and health warning goes to the single webhook in `DISCORD_WEBHOOK_URL`.
+- **Health warnings go to your channel only.** Alerts and the digest also go to the channels added on the public page, if it's on.
 
 ## License
 

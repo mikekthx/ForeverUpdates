@@ -24,6 +24,8 @@ export interface Env {
   DISCORD_WEBHOOK_URL: string;
   ADMIN_TOKEN: string;
   DISCORD_CRITICAL_ROLE_ID?: string;
+  DISCORD_CLIENT_ID?: string;        // with DISCORD_CLIENT_SECRET: the public "Add to Discord" page
+  DISCORD_CLIENT_SECRET?: string;
   GEMINI_MODEL?: string;
   GEMINI_BACKUP_MODEL?: string;      // "none" turns the backup model off
   WORKERS_AI_MODEL?: string;
@@ -32,7 +34,8 @@ export interface Env {
 
 export type WorkMessage =
   | { t: "fetch"; key: string; baseline?: boolean }
-  | { t: "deliver"; id: string };
+  | { t: "deliver"; id: string }
+  | { t: "fanout"; id: string };     // a broadcast to other servers' webhooks
 
 export interface ClassifyMessage { id: string }
 
