@@ -4,8 +4,6 @@ import { UPDATE_MARKER, updateFocus } from "./diff";
 import { cutMarkdown, escapeMarkdown, inlineMarkdown, linkUrl } from "./markdown";
 import { clip, splitVideoLine } from "./text";
 
-export { escapeMarkdown };
-
 export interface DigestRow {
   id: string;
   source: string;  // "Blizzard News" or a Blue Post label

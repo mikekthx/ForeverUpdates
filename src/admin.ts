@@ -8,7 +8,7 @@ import { errMessage, getHtml, getJson } from "./http";
 import { postText } from "./lib/forum";
 import { geminiModels, geminiPauseKey } from "./llm/chain";
 import { articleProbe, extractArticleFullText, extractArticleTitle } from "./lib/news";
-import { postIdFromKey, runPoll } from "./poller";
+import { postIdFromKey, runPoll, seededKey } from "./poller";
 import { collectSources, forumRegions, resolveAllCategories } from "./sources";
 import type { Env } from "./types";
 
@@ -55,10 +55,11 @@ async function status(env: Env) {
                 FROM events ORDER BY created_at DESC LIMIT 20`)
   ]);
   const gemini = geminiModels(env);
-  const kv = await kvGetMany(db, ["seeded", "digest:last", "digest:inflight", ...gemini.map(m => geminiPauseKey(m.model)), "pause:workers-ai"]);
+  const seedFlag = seededKey(forumRegions(env));
+  const kv = await kvGetMany(db, [seedFlag, "digest:last", "digest:inflight", ...gemini.map(m => geminiPauseKey(m.model)), "pause:workers-ai"]);
   const pausedUntil = (k: string) => { const v = kv.get(k)?.value; return v && Date.parse(v) > Date.now() ? v : null; };
   return {
-    seeded: kv.get("seeded")?.value ?? null,
+    seeded: kv.get(seedFlag)?.value ?? null,
     lastDigest: kv.get("digest:last")?.value ?? null,
     // A digest run in progress (or one that stopped; the next digest run settles it).
     digestInFlight: (() => {

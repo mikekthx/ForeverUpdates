@@ -1,7 +1,8 @@
 /** Per-source health, plus a backlog check that catches a stalled queue. */
 
-import { BACKLOG_WARN_MIN, HEALTH_MAX_EMPTY, HEALTH_MAX_FAILURES, HEALTH_WARN_COOLDOWN_HOURS } from "./config";
+import { BACKLOG_WARN_MIN, DIGEST_HOUR, HEALTH_MAX_EMPTY, HEALTH_MAX_FAILURES, HEALTH_WARN_COOLDOWN_HOURS } from "./config";
 import { kvGet, kvSet } from "./db";
+import { digestClock } from "./digest";
 import { postDiscord } from "./discord";
 import { errMessage } from "./http";
 import { clip } from "./lib/text";
@@ -38,14 +39,24 @@ export async function recordHealth(db: D1Database, sources: SourceResult[]): Pro
 }
 
 /** Work that has waited much longer than it should: the queue or consumer is stuck. */
-export async function backlog(db: D1Database): Promise<{ docs: number; events: number; alerts: number }> {
+export async function backlog(db: D1Database, now = new Date()): Promise<{ docs: number; events: number; alerts: number; digest: number }> {
   const age = `-${BACKLOG_WARN_MIN} minutes`;
-  const [docs, events, alerts] = await db.batch<{ n: number }>([
+  // The last day a digest was due (an hour's grace after DIGEST_HOUR). Every digest run that gets
+  // through closes its day, even an empty one, so a digest that keeps failing leaves digest:last behind it.
+  const clock = digestClock(now);
+  // The day before, by calendar (a 23 h DST day would make "24 hours ago" two days back).
+  const dueDay = clock.hour > DIGEST_HOUR ? clock.date : new Date(Date.parse(`${clock.date}T12:00:00Z`) - 86_400_000).toISOString().slice(0, 10);
+  const [docs, events, alerts, digest] = await db.batch<{ n: number }>([
     db.prepare("SELECT COUNT(*) AS n FROM documents WHERE status = 'new' AND first_seen < datetime('now', ?)").bind(age),
     db.prepare("SELECT COUNT(*) AS n FROM events WHERE state = 'pending' AND created_at < datetime('now', ?)").bind(age),
-    db.prepare("SELECT COUNT(*) AS n FROM events WHERE alert_state = 'pending' AND created_at < datetime('now', ?)").bind(age)
+    db.prepare("SELECT COUNT(*) AS n FROM events WHERE alert_state = 'pending' AND created_at < datetime('now', ?)").bind(age),
+    // Items over a day old (so a new bot doesn't warn before its first digest) still queued after a missed digest.
+    db.prepare(
+      `SELECT COUNT(*) AS n FROM events WHERE digest_state = 'queued' AND created_at < datetime('now', '-25 hours')
+         AND COALESCE((SELECT value FROM kv WHERE key = 'digest:last'), '') < ?`).bind(dueDay)
   ]);
-  return { docs: docs.results?.[0]?.n ?? 0, events: events.results?.[0]?.n ?? 0, alerts: alerts.results?.[0]?.n ?? 0 };
+  const n = (r: D1Result<{ n: number }>) => r.results?.[0]?.n ?? 0;
+  return { docs: n(docs), events: n(events), alerts: n(alerts), digest: n(digest) };
 }
 
 export async function warnIfUnhealthy(env: Env): Promise<void> {
@@ -66,9 +77,13 @@ export async function warnIfUnhealthy(env: Env): Promise<void> {
   const stuck = await backlog(db);
   const lastBacklogWarn = await kvGet(db, "warn:backlog");
   const backlogDue = !lastBacklogWarn || Date.now() - Date.parse(lastBacklogWarn) > HEALTH_WARN_COOLDOWN_HOURS * 3_600_000;
-  const stuckTotal = stuck.docs + stuck.events + stuck.alerts;
-  if (stuckTotal > 0 && backlogDue) {
+  const queued = stuck.docs + stuck.events + stuck.alerts;
+  const stuckTotal = queued + stuck.digest;
+  if (queued > 0 && backlogDue) {
     lines.push(`• **queues**: ${stuck.docs} item(s) not fetched, ${stuck.events} not classified and ${stuck.alerts} alert(s) not sent for over ${BACKLOG_WARN_MIN} min. Check the queue consumer in \`wrangler tail\` and the Queues daily operations quota.`);
+  }
+  if (stuck.digest > 0 && backlogDue) {
+    lines.push(`• **digest**: ${stuck.digest} digest item(s) waiting: a digest was due but none went out. Discord may be refusing it: check \`wrangler tail\`.`);
   }
   if (!lines.length) return;
 

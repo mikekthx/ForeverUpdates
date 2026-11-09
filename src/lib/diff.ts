@@ -28,11 +28,6 @@ export function markAddedLines(oldText: string, newText: string): { added: strin
   return { added, marked: marked.join("\n") };
 }
 
-/** Lines present in newText that were not in oldText, in order. */
-export function addedLines(oldText: string, newText: string): string[] {
-  return markAddedLines(oldText, newText).added;
-}
-
 export const UPDATE_MARKER = "[EDITED: lines marked [NEW] were added since the last check]";
 
 /**

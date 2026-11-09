@@ -1,4 +1,3 @@
-import type { Classification } from "./lib/classify";
 
 export type Region = "us" | "eu";
 /** Gemini 3.x thinking levels (there is no "minimal"). */
@@ -85,4 +84,3 @@ export interface EventRow {
   classify_attempts: number;
 }
 
-export interface ClassifiedEvent { cls: Classification; by: "gemini" | "gemini-backup" | "workers-ai" | "keywords" }

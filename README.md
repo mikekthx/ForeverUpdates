@@ -86,7 +86,7 @@ These Worker variables (in `[vars]` in `wrangler.toml`) override the defaults:
 
 | Variable | Default | Effect |
 | :--- | :--- | :--- |
-| `FORUM_REGIONS` | `us` | Forums to poll; `us,eu` adds the EU forums. |
+| `FORUM_REGIONS` | `us` | Forums to poll; `us,eu` adds the EU forums. Changing it makes the next run seed again (no alerts for that run). |
 | `GEMINI_MODEL` | `gemini-3.5-flash-lite` | Main model. |
 | `GEMINI_BACKUP_MODEL` | `gemini-3.6-flash` | Model tried when the main one fails. `none` turns it off. |
 | `WORKERS_AI_MODEL` | `@cf/meta/llama-3.3-70b-instruct-fp8-fast` | Fallback model used while Gemini is paused. |

@@ -248,6 +248,12 @@ try {
   assert.equal((await call("/")).status, 200);
   ok("admin routes reject missing/wrong token");
 
+  // 0b. (audit #1) A first run whose news page shows no articles (bot check, outage) doesn't count
+  //     as seeded: scenario 1 below then seeds instead of alerting on the whole news listing.
+  await poll(); await settle();
+  assert.equal(await db.prepare("SELECT 1 FROM kv WHERE key LIKE 'seeded%'").first(), null);
+  ok("a first run with an empty news page doesn't mark the bot seeded");
+
   // 1. First run seeds: nothing alerts, no model calls; only watch-worthy items get a baseline fetch.
   const oldKi = forumPost({ region: "us", categoryId: 348, title: "WoW: Forever Known Issues", text: "We are tracking the following issues.\nSome quest givers are missing.", topicId: 4000 });
   const oldChat = forumPost({ region: "us", categoryId: 348, title: "Skyborne feedback", text: "Thanks everyone!", topicId: 4001 });
@@ -331,6 +337,29 @@ try {
   assert.ok(h7b.body.includes("Skyborne gliding"));
   assert.equal((await events("doc_key = 'news:7'")).length, 0, "baselines never create events");
   ok("failed seeded baseline is retried by the sweeper and watching resumes");
+
+  // 3c. (audit #1) A forum region added later is seeded, not alerted: its last 48 h of posts are old news.
+  await db.prepare("UPDATE kv SET key = 'seeded:us' WHERE key = 'seeded:us,eu'").run();
+  const euOld = forumPost({ region: "eu", categoryId: 360, title: "Realm queues tonight", text: "We are aware of realm queues.", author: "Linxy", ageMs: 20 * HOUR, topicId: 7100, postNumber: 3 });
+  world.euTracker = [...world.euTracker, euOld];
+  await poll(); await settle();
+  assert.equal((await doc(`post:eu:${euOld.id}`)).status, "seeded");
+  assert.equal((await events(`doc_key = 'post:eu:${euOld.id}'`)).length, 0);
+  assert.ok(await db.prepare("SELECT 1 FROM kv WHERE key = 'seeded:us,eu'").first());
+  assert.equal(await db.prepare("SELECT 1 FROM kv WHERE key = 'seeded:us'").first(), null, "switching back to us later must seed again");
+  ok("changing the forum regions seeds once instead of alerting on the new region's posts");
+
+  // 3d. (audit #2) A seeded post whose baseline never loads stops being watched but stays 'seeded',
+  //     so it can never look like a teaser-only item waiting for its full text.
+  const neverLoads = forumPost({ region: "us", categoryId: 348, title: "Maintenance", text: "x", topicId: 7200 });
+  world.postFail[`us:${neverLoads.id}`] = 99;
+  await db.prepare(`INSERT INTO documents (key, kind, source, url, title, author, status, watch_tier, watch_until, fetch_attempts)
+    VALUES (?, 'post', 'Blue Post (US)', 'u', 'Maintenance', 'a', 'seeded', 2, datetime('now', '+1 day'), 11)`).bind(`post:us:${neverLoads.id}`).run();
+  await poll(); await settle();
+  const gaveUp = await doc(`post:us:${neverLoads.id}`);
+  assert.deepEqual([gaveUp.status, gaveUp.watch_tier, gaveUp.body], ["seeded", 0, null]);
+  world.postFail[`us:${neverLoads.id}`] = 0;
+  ok("a baseline that never loads stops watching and stays 'seeded'");
 
   // 3c. (review #1) Page down for the whole retry cycle → classified from its teaser; when the page
   //     recovers, the full text is classified as its own event instead of being silently dropped.
@@ -857,7 +886,23 @@ try {
   assert.equal(warnings.length, 1);
   assert.match(warnings[0].embeds[0].description, /queues/);
   await (await fakes.fetch("http://fakes/drain")).json();
-  ok("health: broken source and stuck queue each produce one warning");
+  // (audit #3) A digest item still waiting after a day: Discord keeps refusing the digest.
+  await db.prepare(`INSERT INTO events (id, doc_key, kind, source, title, url, author, content, state, digest_state, created_at)
+    VALUES ('stuck-digest', 'news:x', 'new', 'Blizzard News', 't', 'u', 'a', 'c', 'done', 'queued', datetime('now', '-26 hours'))`).run();
+  await db.prepare("DELETE FROM kv WHERE key = 'warn:backlog'").run();
+  // Not stuck when the day's digest already went (e.g. sent early by hand): the item waits for the next one.
+  await db.prepare("INSERT INTO kv (key, value) VALUES ('digest:last', '2099-01-01')").run();
+  assert.equal((await call("/status")).body.stuck.digest, 0);
+  await db.prepare("DELETE FROM kv WHERE key = 'digest:last'").run();
+  d0 = world.discord.length;
+  await poll();
+  warnings = world.discord.slice(d0).filter(m => /health warning/.test(m.embeds?.[0]?.title ?? ""));
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0].embeds[0].description, /1 digest item\(s\) waiting: a digest was due/);
+  assert.equal((await call("/status")).body.stuck.digest, 1);
+  await db.prepare("DELETE FROM events WHERE id = 'stuck-digest'").run();
+  await (await fakes.fetch("http://fakes/drain")).json();
+  ok("health: broken source, stuck queue and stuck digest each produce one warning");
 
   // 14. /status and /debug
   const st = (await call("/status")).body;

@@ -94,9 +94,10 @@ export async function processFetch(env: Env, key: string, baseline: boolean, att
     if (attempts < WORK_MAX_ATTEMPTS) return { retryAfterSec: 60 * attempts };
     if (isBaseline) {
       // Stay 'seeded' so the sweeper retries the baseline in 20 min. Stop watching only after a
-      // long outage (never diff against a teaser).
+      // long outage (never diff against a teaser). It stays 'seeded' even then: an 'ok' row without
+      // a body would look like a new item still waiting for its full text.
       if (doc.fetch_attempts + 1 >= BASELINE_MAX_FETCHES) {
-        await db.prepare("UPDATE documents SET status = 'ok', watch_tier = 0 WHERE key = ?").bind(key).run();
+        await db.prepare("UPDATE documents SET watch_tier = 0 WHERE key = ?").bind(key).run();
       }
       return {};
     }
@@ -215,12 +216,16 @@ function alertPayload(env: Env, row: AlertRow): Record<string, unknown> {
   return buildAlertPayload({ title: row.title, url: row.url, content: row.content ?? "", summary: row.summary ?? "" }, { roleId: env.DISCORD_CRITICAL_ROLE_ID });
 }
 
+async function sendAlert(env: Env, row: AlertRow): Promise<void> {
+  await postDiscord(env.DISCORD_WEBHOOK_URL, alertPayload(env, row));
+  await env.DB.prepare("UPDATE events SET alert_state = 'sent' WHERE id = ?").bind(row.id).run();
+  await bumpCounter(env.DB, "alerts");
+}
+
 /** One attempt, used right after classification. Returns false if it should be retried later. */
 export async function trySendAlert(env: Env, row: AlertRow): Promise<boolean> {
   try {
-    await postDiscord(env.DISCORD_WEBHOOK_URL, alertPayload(env, row));
-    await env.DB.prepare("UPDATE events SET alert_state = 'sent' WHERE id = ?").bind(row.id).run();
-    await bumpCounter(env.DB, "alerts");
+    await sendAlert(env, row);
     return true;
   } catch (err) {
     console.warn(`Alert for ${row.id} failed, will retry:`, errMessage(err));
@@ -233,9 +238,7 @@ async function processDeliver(env: Env, id: string, attempts: number): Promise<O
   const row = await env.DB.prepare("SELECT * FROM events WHERE id = ?").bind(id).first<AlertRow & { alert_attempts: number }>();
   if (!row || row.alert_state !== "pending") return {};
   try {
-    await postDiscord(env.DISCORD_WEBHOOK_URL, alertPayload(env, row));
-    await env.DB.prepare("UPDATE events SET alert_state = 'sent' WHERE id = ?").bind(id).run();
-    await bumpCounter(env.DB, "alerts");
+    await sendAlert(env, row);
     return {};
   } catch (err) {
     const total = row.alert_attempts + 1;

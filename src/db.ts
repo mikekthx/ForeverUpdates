@@ -18,15 +18,11 @@ export async function kvGet(db: D1Database, key: string): Promise<string | null>
   return (await kvGetMany(db, [key])).get(key)?.value ?? null;
 }
 
-export function kvSetStmt(db: D1Database, key: string, value: string): D1PreparedStatement {
-  return db.prepare(
+export async function kvSet(db: D1Database, key: string, value: string): Promise<void> {
+  await db.prepare(
     `INSERT INTO kv (key, value, updated_at) VALUES (?, ?, datetime('now'))
      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
-  ).bind(key, value);
-}
-
-export async function kvSet(db: D1Database, key: string, value: string): Promise<void> {
-  await kvSetStmt(db, key, value).run();
+  ).bind(key, value).run();
 }
 
 /** Daily counters shown on /status (e.g. which model classified how many items). */

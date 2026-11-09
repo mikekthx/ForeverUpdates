@@ -25,6 +25,9 @@ export interface PollStats {
   queueError?: string;
 }
 
+/** The "seeded" flag names the forum regions it covers, so adding a region seeds once more. */
+export const seededKey = (regions: Region[]) => `seeded:${regions.join(",")}`;
+
 /** Watch tier for a newly seen document (relevant articles are promoted later by the classifier). */
 export function initialWatchTier(hit: Hit): number {
   if (hit.kind === "news") return HOTFIX_TITLE.test(hit.title) ? 3 : 0;
@@ -35,7 +38,8 @@ export async function runPoll(env: Env, opts: { seedOnly?: boolean } = {}): Prom
   const db = env.DB;
   const stats: PollStats = { hits: 0, newDocs: 0, seeded: 0, queued: 0, probed: 0, changed: 0, nudged: 0, sourceErrors: [] };
   const regions = forumRegions(env);
-  const kv = await kvGetMany(db, [...regions.map(r => `cats:${r}`), "seeded"]);
+  const seedFlag = seededKey(regions);
+  const kv = await kvGetMany(db, [...regions.map(r => `cats:${r}`), seedFlag]);
 
   // 1. Sources.
   const sources = await collectSources(await resolveAllCategories(db, regions, kv));
@@ -46,7 +50,7 @@ export async function runPoll(env: Env, opts: { seedOnly?: boolean } = {}): Prom
 
   // 2. New documents. On the first run (or /seed) everything visible is recorded as already seen;
   //    only watch-worthy ones are fetched, to get a baseline for edit detection.
-  const seeding = opts.seedOnly || !kv.has("seeded");
+  const seeding = opts.seedOnly || !kv.has(seedFlag);
   const existing = new Set<string>();
   for (let i = 0; i < hits.length; i += 50) {
     const chunk = hits.slice(i, i + 50).map(h => h.key);
@@ -78,7 +82,15 @@ export async function runPoll(env: Env, opts: { seedOnly?: boolean } = {}): Prom
   }
   stats.newDocs = seeding ? 0 : fresh.length;
   stats.seeded = seeding ? fresh.length : 0;
-  if (seeding) await kvSet(db, "seeded", new Date().toISOString());
+  if (seeding) {
+    // Seeded only after a complete look: anything a failed source (or a news page showing no
+    // articles, e.g. a bot check) hid would otherwise alert later as new. News has no post date,
+    // so nothing else stops its old articles; forum posts older than 48 h are dropped anyway.
+    const complete = sources.every(s => s.ok && (s.key !== "news" || s.rawCount > 0));
+    // Every flag goes, so a failed /seed seeds again next run, and so does switching back to a region set used before.
+    await db.prepare("DELETE FROM kv WHERE key LIKE 'seeded%'").run();
+    if (complete) await kvSet(db, seedFlag, new Date().toISOString());
+  }
 
   // 3. Cheap edit probes on watched documents that are due (highest tier first).
   const probes = await probeWatched(db);

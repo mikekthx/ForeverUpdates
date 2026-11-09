@@ -1,7 +1,7 @@
 /** news.blizzard.com: listing cards, article text, and a cheap change probe. */
 
 import { decodeEntities, dropElements, firstYoutubeLink, htmlToText, sha256Hex, tagAttrs, tokenize } from "./text";
-import { clipMarkdown, htmlToMarkdown } from "./markdown";
+import { htmlToMarkdown } from "./markdown";
 
 // Blocks a page never shows (and that change per request: nonces, tokens, render times).
 const NOT_SHOWN = ["script", "style", "noscript", "template"];
@@ -207,11 +207,6 @@ function articleBody(html: string): { text: string; html: string } {
     }
   }
   return best.text ? best : { text: htmlToText(markupOnly), html: markupOnly };
-}
-
-/** Readable article text, clipped for the model. */
-export function extractArticleText(html: string, max: number): string {
-  return clipMarkdown(extractArticleFullText(html), max);
 }
 
 /**

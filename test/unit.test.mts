@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { clip, decodeEntities, firstYoutubeLink, htmlToText, normalizeText, tokenize } from "../src/lib/text.ts";
-import { clipMarkdown, htmlToMarkdown, plainLine, stripMarkdown } from "../src/lib/markdown.ts";
+import { clipMarkdown, escapeMarkdown, htmlToMarkdown, plainLine, stripMarkdown } from "../src/lib/markdown.ts";
 import { balanced as lineBalanced } from "./balanced.mts";
-import { parseNewsListing, extractArticleText, extractArticleTitle, titleFromSlug, extractArticleFullText, articleProbe } from "../src/lib/news.ts";
-import { addedLines, markAddedLines, updateFocus, UPDATE_MARKER } from "../src/lib/diff.ts";
+import { parseNewsListing, extractArticleTitle, titleFromSlug, extractArticleFullText, articleProbe } from "../src/lib/news.ts";
+import { markAddedLines, updateFocus, UPDATE_MARKER } from "../src/lib/diff.ts";
 import { pickForeverCategories, flattenCategoryList, parseTracker, parseSearch, newsPointerArticleId, postText, isNewsCopyExcerpt } from "../src/lib/forum.ts";
 import { heuristicClassify, sanitizeClassification } from "../src/lib/classify.ts";
-import { buildDigestMessage, buildAlertPayload, cutAtSentence, escapeMarkdown, shortLink, embedTextLength, DISCORD_EMBED_TOTAL_LIMIT, DIGEST_BLUE_POST_COLOR, DIGEST_NEWS_COLOR, ALERT_COLOR } from "../src/lib/discord.ts";
+import { buildDigestMessage, buildAlertPayload, cutAtSentence, shortLink, embedTextLength, DISCORD_EMBED_TOTAL_LIMIT, DIGEST_BLUE_POST_COLOR, DIGEST_NEWS_COLOR, ALERT_COLOR } from "../src/lib/discord.ts";
 import { fingerprintNew, fingerprintEdit } from "../src/lib/fingerprint.ts";
 import { initialWatchTier } from "../src/poller.ts";
 import { forumRegions, wantedNewsTitle } from "../src/sources.ts";
@@ -68,8 +68,8 @@ assert.equal(cards[1].url, "https://news.blizzard.com/en-us/article/24302093/car
 ok("parseNewsListing merges split cards, strips labels, skips empty/script anchors");
 
 const article = `<html><nav>Menu stuff</nav><article><h1>Hotfixes</h1><style>.x{}</style><p>WoW: Forever &ndash; fixed a crash.</p></article><footer>©</footer></html>`;
-assert.equal(extractArticleText(article, 1000), "# Hotfixes\nWoW: Forever – fixed a crash.");
-ok("extractArticleText prefers <article>, drops nav/footer/style");
+assert.equal(extractArticleFullText(article), "# Hotfixes\nWoW: Forever – fixed a crash.");
+ok("extractArticleFullText prefers <article>, drops nav/footer/style");
 
 // Stretched-link cards: empty anchor, title in a sibling element → title from the URL slug
 const overlay = `<div class="card"><a class="Card-link" href="/en-us/article/24411111/wow-forever-class-tuning-incoming"></a><h2>Class Tuning Incoming</h2></div>`;
@@ -84,20 +84,20 @@ ok("parseNewsListing falls back to the URL slug for empty overlay links");
 const ld = `<html><head><meta property="og:title" content="OG Title">
 <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"NewsArticle","headline":"Hotfixes: November 4, 2026","articleBody":"${"WoW: Forever. Fixed an issue with Skyborne glide. ".repeat(6)}"}]}</script>
 </head><body><div class="redesigned"><p>teaser only</p></div></body></html>`;
-assert.match(extractArticleText(ld, 10_000), /Skyborne glide/);
+assert.match(extractArticleFullText(ld), /Skyborne glide/);
 assert.equal(extractArticleTitle(ld), "Hotfixes: November 4, 2026");
 assert.equal(extractArticleTitle(`<meta property="og:title" content="OG &amp; Title">`), "OG & Title");
 assert.equal(extractArticleTitle(`<h1>Plain <b>H1</b></h1>`), "Plain H1");
 ok("JSON-LD articleBody/headline used when markup changes; og:title and h1 fallbacks");
 
-// addedLines: only text that wasn't there before, whitespace/case-insensitive
+// markAddedLines: only text that wasn't there before, whitespace/case-insensitive
 const v1 = "Hotfixes\nNovember 4, 2026\nWoW: Forever\nFixed a crash.";
 const v2 = "Hotfixes\nNovember 6, 2026\nWoW: Forever\nSkyborne glide no longer drains stamina while mounted.\nNovember 4, 2026\nWoW: Forever\nfixed a  crash.";
-assert.deepEqual(addedLines(v1, v2), ["November 6, 2026", "Skyborne glide no longer drains stamina while mounted."]);
-assert.deepEqual(addedLines(v2, v2), []);
+assert.deepEqual(markAddedLines(v1, v2).added, ["November 6, 2026", "Skyborne glide no longer drains stamina while mounted."]);
+assert.deepEqual(markAddedLines(v2, v2).added, []);
 assert.equal(markAddedLines(v1, v2).marked.split("\n").slice(0, 4).join("|"),
   "Hotfixes|[NEW] November 6, 2026|WoW: Forever|[NEW] Skyborne glide no longer drains stamina while mounted.");
-ok("addedLines returns only newly added lines");
+ok("markAddedLines returns only newly added lines");
 
 // Extraction: largest top-level <article> wins (related-article cards ignored), nested articles
 // don't cut it short, and a short JSON-LD summary doesn't beat the real body.
