@@ -1229,6 +1229,25 @@ try {
     assert.equal(await hookRow("340000000000000004"), null);
     await db.prepare("DELETE FROM webhooks").run();
     ok("public page: sign-ups stop at MAX_SUBSCRIBERS");
+
+    // A pending delivery whose channel was removed by hand is ignored by the sweeper and /status.
+    // The digest's cleanup drops broadcasts (and their deliveries) older than 7 days.
+    await db.prepare(`INSERT INTO broadcasts (id, kind, payload, created_at) VALUES
+      ('orphan', 'alert', '{}', datetime('now', '-2 hours')), ('old', 'alert', '{}', datetime('now', '-8 days')), ('recent', 'alert', '{}', datetime('now', '-2 days'))`).run();
+    await db.prepare(`INSERT INTO deliveries (broadcast_id, webhook_id, state) VALUES
+      ('orphan', '399999999999999999', 'pending'), ('old', '399999999999999999', 'sent'), ('recent', '399999999999999999', 'sent')`).run();
+    await poll();
+    const { work: queuedNow } = await (await fakes.fetch("http://fakes/drain")).json();
+    assert.equal(queuedNow.filter(m => m.body.t === "fanout").length, 0, "no fan-out for a removed channel");
+    assert.equal((await call("/status")).body.subscribers.pendingDeliveries, 0);
+    await db.prepare("DELETE FROM kv WHERE key IN ('digest:last', 'digest:inflight')").run();
+    assert.equal((await call("/run-digest")).status, 200);
+    const left = (await db.prepare("SELECT id FROM broadcasts WHERE id IN ('orphan', 'old', 'recent') ORDER BY id").all()).results.map(x => x.id);
+    assert.deepEqual(left, ["orphan", "recent"]);
+    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM deliveries WHERE broadcast_id = 'old'").first()).n, 0);
+    await db.prepare("DELETE FROM deliveries").run();
+    await db.prepare("DELETE FROM broadcasts WHERE id IN ('orphan', 'recent')").run();
+    ok("fan-out: a channel removed by hand is ignored; broadcasts older than 7 days are cleaned up");
   }
 
   console.log(`\n${passed} integration scenarios passed`);

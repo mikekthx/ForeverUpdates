@@ -149,7 +149,7 @@ export function staleBroadcastsStmt(db: D1Database, limit: number): D1PreparedSt
     `SELECT b.id FROM broadcasts b
      WHERE b.created_at > datetime('now', '-1 day')
        AND COALESCE(b.nudged_at, b.created_at) < datetime('now', ?)
-       AND EXISTS (SELECT 1 FROM deliveries d WHERE d.broadcast_id = b.id AND d.state = 'pending')
+       AND EXISTS (SELECT 1 FROM deliveries d JOIN webhooks w ON w.id = d.webhook_id WHERE d.broadcast_id = b.id AND d.state = 'pending')
      LIMIT ?`
   ).bind(`-${NUDGE_AFTER_MIN} minutes`, limit);
 }

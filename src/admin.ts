@@ -55,7 +55,7 @@ async function status(env: Env) {
     db.prepare(`SELECT id, title, kind, state, classified_by, relevant, critical, alert_state, digest_state, created_at
                 FROM events ORDER BY created_at DESC LIMIT 20`),
     db.prepare(`SELECT (SELECT COUNT(*) FROM webhooks) AS channels,
-                       (SELECT COUNT(*) FROM deliveries WHERE state = 'pending') AS pendingDeliveries,
+                       (SELECT COUNT(*) FROM deliveries d JOIN webhooks w ON w.id = d.webhook_id WHERE d.state = 'pending') AS pendingDeliveries,
                        (SELECT COUNT(*) FROM deliveries WHERE state = 'failed' AND created_at > datetime('now', '-1 day')) AS failedLastDay`),
     // Never the tokens or manage keys.
     db.prepare(`SELECT id, guild_id, channel_id, role_id, last_ok_at, last_error, created_at FROM webhooks ORDER BY created_at DESC LIMIT 50`)

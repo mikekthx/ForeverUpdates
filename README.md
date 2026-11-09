@@ -122,7 +122,12 @@ Share `https://forever-updates.<your-subdomain>.workers.dev/`. After adding a ch
 - Sign-ups stop at `MAX_SUBSCRIBERS` (100) in `src/config.ts`. Each alert and digest costs one Discord request per channel, sent 20 at a time in work-queue messages, so 100 channels add about 5 queue messages per alert.
 - Without the two secrets, the page is off and `/` answers as before.
 - **What's stored per channel:** the webhook's ID and token, the server and channel IDs, the role ID and a hash of the settings key. Nothing from the server itself.
-- To remove a channel yourself, delete its row in the D1 console: `DELETE FROM webhooks WHERE channel_id = '<channel ID>';`. Its webhook stays in that server until someone deletes it there.
+- To remove a channel yourself, run this in the D1 console. Its webhook stays in that server until someone deletes it there.
+
+  ```sql
+  DELETE FROM deliveries WHERE webhook_id IN (SELECT id FROM webhooks WHERE channel_id = '<channel ID>');
+  DELETE FROM webhooks WHERE channel_id = '<channel ID>';
+  ```
 
 ## Configuration
 
