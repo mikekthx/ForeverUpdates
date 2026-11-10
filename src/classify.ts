@@ -3,7 +3,7 @@
  * fallback), stores the results, promotes relevant articles to the watch list, and sends alerts.
  */
 
-import { CLASSIFY_MAX_ATTEMPTS, OPERATIONAL_TITLE, WATCH_TIERS } from "./config";
+import { CLASSIFY_MAX_ATTEMPTS, GEMINI_WAIT_MIN, OPERATIONAL_TITLE, WATCH_TIERS } from "./config";
 import { bumpCounter, placeholders, sqlTime } from "./db";
 import { broadcastStmts, startFanout } from "./fanout";
 import { Classification, heuristicClassify } from "./lib/classify";
@@ -27,16 +27,27 @@ export async function handleClassifyBatch(batch: MessageBatch<ClassifyMessage>, 
     source: r.source, author: r.author, title: r.title, content: r.content,
     forumVerified: !!r.forum_verified, postedAt: null
   }));
-  const chain = rows.length ? await classifyItems(env, items) : { results: new Map(), overflow: new Set<number>(), errors: [] };
+  // How long each item may wait for Gemini: an urgent-looking Blue Post doesn't (it alerts at once,
+  // like on keywords when no model is up). created_at is SQLite UTC ("YYYY-MM-DD HH:MM:SS"); one in
+  // the future (clock skew) or unreadable means no wait, so the deadline can't slide with retries.
+  const waitUntil = rows.map(r => {
+    if (r.forum_verified && heuristicClassify({ title: r.title, content: r.content, forumVerified: true }).is_critical) return 0;
+    const created = Date.parse(`${r.created_at.replace(" ", "T")}Z`);
+    return created <= Date.now() ? created + GEMINI_WAIT_MIN * 60_000 : 0;
+  });
+  const chain = rows.length ? await classifyItems(env, items, waitUntil)
+    : { results: new Map(), overflow: new Set<number>(), waiting: new Set<number>(), retryAfterSec: 0, errors: [] };
   if (chain.errors.length) console.warn("Classification errors:", chain.errors);
 
   const decided = new Map<string, { cls: Classification; by: By }>();
   const deferred: string[] = [];
   const overflow: string[] = [];
+  const waiting: string[] = [];
   rows.forEach((row, i) => {
     const got = chain.results.get(i);
     if (got) { decided.set(row.id, got); return; }
     if (chain.overflow.has(i)) { overflow.push(row.id); return; } // not a failure; no attempt counted
+    if (chain.waiting.has(i)) { waiting.push(row.id); return; }   // Gemini back shortly; no attempt counted
     // No model available. An urgent-looking Blue Post goes out now on keywords; anything else
     // waits for a model, up to CLASSIFY_MAX_ATTEMPTS tries.
     const fallback = heuristicClassify({ title: row.title, content: row.content, forumVerified: !!row.forum_verified });
@@ -83,8 +94,9 @@ export async function handleClassifyBatch(batch: MessageBatch<ClassifyMessage>, 
       `UPDATE events SET classify_attempts = classify_attempts + 1, nudged_at = datetime('now') WHERE id IN (${placeholders(deferred.length)})`
     ).bind(...deferred));
   }
-  if (overflow.length) {
-    stmts.push(db.prepare(`UPDATE events SET nudged_at = datetime('now') WHERE id IN (${placeholders(overflow.length)})`).bind(...overflow));
+  if (overflow.length || waiting.length) {
+    const held = [...overflow, ...waiting];
+    stmts.push(db.prepare(`UPDATE events SET nudged_at = datetime('now') WHERE id IN (${placeholders(held.length)})`).bind(...held));
   }
   const stored = stmts.length ? await db.batch(stmts) : [];
   await startFanout(env, fanouts.filter(f => (stored[f.at]?.meta?.changes ?? 0) > 0).map(f => f.id));
@@ -108,9 +120,11 @@ export async function handleClassifyBatch(batch: MessageBatch<ClassifyMessage>, 
 
   const deferredSet = new Set(deferred);
   const overflowSet = new Set(overflow);
+  const waitingSet = new Set(waiting);
   for (const m of batch.messages) {
     if (deferredSet.has(m.body.id)) m.retry({ delaySeconds: 300 });
     else if (overflowSet.has(m.body.id)) m.retry({ delaySeconds: 10 });
+    else if (waitingSet.has(m.body.id)) m.retry({ delaySeconds: chain.retryAfterSec });
     else m.ack();
   }
 }

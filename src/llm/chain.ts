@@ -8,7 +8,7 @@
 
 import {
   DIGEST_TLDR_TIMEOUT_MS, GEMINI_BACKUP_MODEL, GEMINI_BATCH_CHARS, GEMINI_DEFAULT_MODEL, GEMINI_MODEL_SETTINGS, GEMINI_UNLISTED_MODEL_SETTINGS,
-  LLM_PAUSE_DAILY_QUOTA_MIN, LLM_PAUSE_OVERLOAD_MIN, LLM_PAUSE_RATE_LIMIT_MIN,
+  LLM_PAUSE_DAILY_QUOTA_MIN, LLM_PAUSE_OVERLOAD_MIN, LLM_PAUSE_OVERLOAD_REPEAT_MIN, LLM_PAUSE_RATE_LIMIT_MIN,
   WORKERS_AI_DEFAULT_MODEL, WORKERS_AI_ITEM_CHARS
 } from "../config";
 import { bumpCounter, kvGetMany, kvSet } from "../db";
@@ -44,6 +44,9 @@ export interface ChainResult {
   results: Map<number, { cls: Classification; by: Provider }>;
   /** Items Gemini wasn't asked about only because the batch was full; retry them for Gemini. */
   overflow: Set<number>;
+  /** Items held for Gemini, briefly unavailable (503s, rate limits): retry after retryAfterSec. */
+  waiting: Set<number>;
+  retryAfterSec: number;
   errors: string[];
 }
 
@@ -83,10 +86,18 @@ export async function summarizeThreads(env: Env, threads: { title: string; posts
   }
 }
 
-export async function classifyItems(env: Env, items: PromptItem[]): Promise<ChainResult> {
+/**
+ * `waitUntil[i]` (Unix ms): until when item i may wait for Gemini. When every Gemini model is
+ * unavailable but one is back by then (a 503 spike or rate limit, not a daily quota), the item is
+ * held for it instead of going to Workers AI, whose triage is weaker.
+ */
+export async function classifyItems(env: Env, items: PromptItem[], waitUntil: number[] = []): Promise<ChainResult> {
   const results: ChainResult["results"] = new Map();
   const overflow = new Set<number>();
+  const waiting = new Set<number>();
   const errors: string[] = [];
+  let geminiAnswered = false;
+  let geminiBackAt = Infinity; // the earliest a Gemini model can be called again, if none answered
   const models = geminiModels(env);
   const kv = await kvGetMany(env.DB, [...models.map(m => geminiPauseKey(m.model)), "pause:workers-ai"]);
   const paused = (key: string) => {
@@ -103,7 +114,10 @@ export async function classifyItems(env: Env, items: PromptItem[]): Promise<Chai
       if (take.length === 0 || chars + it.content.length <= GEMINI_BATCH_CHARS) { take.push(i); chars += it.content.length; }
     });
     for (const { provider, model, timeoutMs, thinking } of models) {
-      if (paused(geminiPauseKey(model))) continue;
+      if (paused(geminiPauseKey(model))) {
+        geminiBackAt = Math.min(geminiBackAt, Date.parse(kv.get(geminiPauseKey(model))!.value));
+        continue;
+      }
       try {
         const got = await classifyWithGemini(take.map(i => items[i]), env.GEMINI_API_KEY, model, timeoutMs, thinking);
         got.forEach((cls, j) => results.set(take[j], { cls, by: provider }));
@@ -111,18 +125,29 @@ export async function classifyItems(env: Env, items: PromptItem[]): Promise<Chai
         // Gemini is working: items left out only for size wait for its next batch rather than
         // going to the fallback model with a much shorter excerpt.
         items.forEach((_, i) => { if (!take.includes(i)) overflow.add(i); });
+        geminiAnswered = true;
         break;
       } catch (err) {
         errors.push(err instanceof Error ? err.message : String(err));
         // Failed calls count against the daily quota too (503s included), so count them.
         await bumpCounter(env.DB, `failed:${model}`);
-        await pause(env.DB, geminiPauseKey(model), err);
+        // Overloaded again just after a pause: a longer outage, so the longer pause (fewer failed calls
+        // using quota). 0 minutes: not a passing condition (a bad request, say), so no wait for it.
+        const prevUntil = Date.parse(kv.get(geminiPauseKey(model))?.value ?? "");
+        const again = err instanceof LlmError && err.kind === "overloaded" && Date.now() - prevUntil < 15 * 60_000;
+        const min = again ? LLM_PAUSE_OVERLOAD_REPEAT_MIN : pauseMinutes(err);
+        if (min > 0) {
+          await kvSet(env.DB, geminiPauseKey(model), new Date(Date.now() + min * 60_000).toISOString());
+          geminiBackAt = Math.min(geminiBackAt, Date.now() + min * 60_000);
+        }
       }
     }
+    if (!geminiAnswered) items.forEach((_, i) => { if (geminiBackAt <= (waitUntil[i] ?? 0)) waiting.add(i); });
   }
+  const retryAfterSec = waiting.size ? Math.max(10, Math.ceil((geminiBackAt - Date.now()) / 1000) + 5) : 0;
 
   // 2. Workers AI for anything left (shorter excerpt per item; free allowance is per day).
-  const left = items.map((_, i) => i).filter(i => !results.has(i) && !overflow.has(i));
+  const left = items.map((_, i) => i).filter(i => !results.has(i) && !overflow.has(i) && !waiting.has(i));
   if (left.length && env.AI && !paused("pause:workers-ai")) {
     const model = env.WORKERS_AI_MODEL?.trim() || WORKERS_AI_DEFAULT_MODEL;
     for (const i of left) {
@@ -137,5 +162,5 @@ export async function classifyItems(env: Env, items: PromptItem[]): Promise<Chai
       }
     }
   }
-  return { results, overflow, errors };
+  return { results, overflow, waiting, retryAfterSec, errors };
 }

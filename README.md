@@ -12,7 +12,7 @@ It runs on Cloudflare's free tier (Workers, D1, Queues and Workers AI) and Gemin
 ## How it works
 
 - **Polling.** A cron runs every 5 minutes. It reads the WoW: Forever forum categories (found by their `wow-forever` slug), the Blue Tracker, forum search and the news listing, and records anything new. The first run only records what's already there, so old posts never alert.
-- **Fetching and classifying.** Queue workers fetch each new post or article, then send its text to Gemini (`gemini-3.5-flash-lite`). If Gemini fails, the same request goes to `gemini-3.6-flash`. If Gemini is out of quota, Workers AI (Llama 3.3 70B) takes over. If no model is available, urgent-looking Blue Posts still alert, based on keywords.
+- **Fetching and classifying.** Queue workers fetch each new post or article, then send its text to Gemini (`gemini-3.5-flash-lite`). If Gemini fails, the same request goes to `gemini-3.6-flash`. If both are briefly overloaded (503s), the post waits up to 10 minutes (`GEMINI_WAIT_MIN`) for Gemini to come back. If Gemini is out of quota or stays down, Workers AI (Llama 3.3 70B) takes over. If no model is available, urgent-looking Blue Posts still alert, based on keywords.
 - **Formatting.** Posts keep their own formatting in Discord: bold, italics, lists, headings, links and spoilers. All source text is escaped, so it can't fake a link or ping anyone.
 - **Edit watching.**
   - Hotfix posts are checked every 15 minutes for 21 days.

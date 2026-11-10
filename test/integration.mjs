@@ -581,11 +581,59 @@ try {
   assert.ok(pausedUntil && !gemini5b[1].pausedUntil, "/status shows the main model's pause");
   assert.ok(await db.prepare("SELECT 1 FROM kv WHERE key = 'pause:gemini:gemini-3.5-flash-lite'").first(), "the pause is stored for the model, not its role");
   assert.ok((await call("/status")).body.today["failed:gemini-3.5-flash-lite"] >= 1, "failed calls are counted (they use daily quota too)");
-  // The polls above run back to back; in production they're 5 minutes apart (wrangler.toml cron).
-  assert.ok(Date.parse(pausedUntil) - Date.now() > 5 * 60_000, "the pause outlasts the next 5-minute poll");
+  // A short pause (LLM_PAUSE_OVERLOAD_MIN = 3), so items waiting for Gemini get it back within their wait.
+  const pauseLeft = Date.parse(pausedUntil) - Date.now();
+  assert.ok(pauseLeft > 2 * 60_000 && pauseLeft <= 3 * 60_000, `paused for about 3 minutes (${pauseLeft} ms left)`);
   delete world.geminiModelMode["gemini-3.5-flash-lite"];
   await db.prepare("DELETE FROM kv WHERE key LIKE 'pause:%'").run();
   ok("main Gemini model overloaded: the backup Gemini model classifies the full text; the main model is paused briefly");
+
+  // 5c. BOTH Gemini models overloaded (503 spike, 2026-11-10): a new item waits for Gemini (re-queued
+  //     for when the pause ends) instead of going to Workers AI; once Gemini is back, Gemini classifies
+  //     it. An item older than GEMINI_WAIT_MIN goes to Workers AI as before.
+  world.geminiMode = "overloaded";
+  const spike = forumPost({ region: "us", categoryId: 348, title: "Zone population lowered", text: "Earlier today we lowered zone populations.", topicId: 6012, postNumber: 2 });
+  world.usTracker = [...world.usTracker, spike];
+  const ai5c = (await ai()).calls;
+  await poll();
+  s = await settle({ retries: false });
+  const spikeId = `post:us:${spike.id}`;
+  let sp = (await events(`doc_key = '${spikeId}'`))[0];
+  assert.equal(sp.state, "pending", "waits for Gemini");
+  assert.equal(sp.classify_attempts, 0, "waiting isn't a failed attempt");
+  assert.equal((await ai()).calls, ai5c, "Workers AI not used during the spike");
+  assert.equal(parked.length, 1, "re-queued");
+  // An urgent-looking Blue Post doesn't wait (it would alert on keywords if no model were up at all).
+  const urgent5c = forumPost({ region: "us", categoryId: 348, title: "Login queue status", text: "Login queues are long on PvP realms; adding capacity.", topicId: 6014, postNumber: 2 });
+  world.usTracker = [...world.usTracker, urgent5c];
+  await poll();
+  await settle({ retries: false });
+  assert.equal((await events(`doc_key = 'post:us:${urgent5c.id}'`))[0].classified_by, "workers-ai", "urgent post: Workers AI at once");
+  world.geminiMode = "ok";
+  await db.prepare("DELETE FROM kv WHERE key LIKE 'pause:%'").run(); // the 3-minute pause has passed
+  await settle();
+  sp = (await events(`doc_key = '${spikeId}'`))[0];
+  assert.deepEqual([sp.state, sp.classified_by], ["done", "gemini"], "Gemini classifies it once it's back");
+  // A longer outage: still overloaded when the short pause ends, so each model is paused longer (fewer
+  // failed calls using quota), which is past the wait: the retry goes to Workers AI.
+  world.geminiMode = "overloaded";
+  const late = forumPost({ region: "us", categoryId: 348, title: "Campfire feedback", text: "Thanks for all the campfire stories.", topicId: 6013, postNumber: 2 });
+  world.usTracker = [...world.usTracker, late];
+  await poll();
+  await settle({ retries: false });
+  assert.equal((await events(`doc_key = 'post:us:${late.id}'`))[0].state, "pending");
+  await db.prepare("UPDATE kv SET value = ? WHERE key LIKE 'pause:gemini:%'").bind(new Date(Date.now() - 60_000).toISOString()).run(); // the 3 minutes passed
+  const gem5c = world.geminiModels.length;
+  await settle();
+  assert.equal(world.geminiModels.length, gem5c + 2, "both models tried again after the short pause");
+  assert.equal((await events(`doc_key = 'post:us:${late.id}'`))[0].classified_by, "workers-ai", "still down: Workers AI classifies it");
+  const longPause = Date.parse((await db.prepare("SELECT value FROM kv WHERE key = 'pause:gemini:gemini-3.5-flash-lite'").first()).value) - Date.now();
+  assert.ok(longPause > 9 * 60_000, `overloaded again right after a pause: paused 10 minutes (${longPause} ms left)`);
+  world.geminiMode = "ok";
+  await db.prepare("DELETE FROM kv WHERE key LIKE 'pause:%'").run();
+  // Out of the later digest tests' way (test 12 expects only its own items).
+  await db.prepare("UPDATE events SET digest_state = 'sent' WHERE digest_state = 'queued' AND doc_key IN (?, ?, ?)").bind(spikeId, `post:us:${late.id}`, `post:us:${urgent5c.id}`).run();
+  ok("both Gemini models in a 503 spike: a new item waits for Gemini; in a longer outage the pause grows and Workers AI classifies it");
 
   // 6. Both Gemini models out of daily quota → Workers AI takes over, and both are paused (not called again).
   world.geminiMode = "daily";

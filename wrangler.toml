@@ -36,7 +36,7 @@ max_concurrency = 2         # be gentle with Blizzard's servers
 queue = "forever-updates-classify"
 max_batch_size = 10         # up to 10 items per Gemini call
 max_batch_timeout = 20      # wait up to 20 s to fill a batch
-max_retries = 10
+max_retries = 15          # overflow, Gemini waits and model deferrals all use retries
 max_concurrency = 1
 
 # Forums polled (default: US only). Uncomment to add EU back.

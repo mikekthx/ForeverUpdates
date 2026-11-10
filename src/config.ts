@@ -84,8 +84,15 @@ export const GEMINI_UNLISTED_MODEL_SETTINGS: { thinking: ThinkingLevel; timeoutM
 export const WORKERS_AI_DEFAULT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 export const LLM_PAUSE_DAILY_QUOTA_MIN = 60; // after a per-day quota error, retry the model hourly
 export const LLM_PAUSE_RATE_LIMIT_MIN = 2;
-// 503 "high demand" or a timeout: skip the model past the next 5-minute polls (2026-10-28: hours long).
-export const LLM_PAUSE_OVERLOAD_MIN = 10;
+// 503 "high demand" or a timeout: usually a short spike (2026-11-10), sometimes hours (2026-10-28).
+// Short at first, so items waiting for Gemini (GEMINI_WAIT_MIN) get it back within their wait; a model
+// overloaded again right after its pause is in a longer outage and is paused longer (failed calls use quota).
+export const LLM_PAUSE_OVERLOAD_MIN = 3;
+export const LLM_PAUSE_OVERLOAD_REPEAT_MIN = 10;
+/** When every Gemini model is briefly unavailable, a new item waits up to this long (from its arrival)
+ * for one to come back before going to Workers AI. In practice about 3 minutes (one short pause; a
+ * second failure means the longer pause, which is past the wait), and alerts are that much later. */
+export const GEMINI_WAIT_MIN = 10;
 
 // ── Digest, retention, health ──
 // The digest goes out at 5 PM Pacific (standard or daylight time), the end of Blizzard's US workday.
