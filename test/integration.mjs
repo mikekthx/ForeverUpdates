@@ -103,6 +103,11 @@ async function outbound(request) {
     if (mode === "daily") return jsonRes({ error: { code: 429, message: "Quota exceeded for metric: GenerateRequestsPerDayPerProjectPerModel" } }, 429);
     if (mode === "rate") return jsonRes({ error: { code: 429, message: "Quota exceeded for metric: GenerateRequestsPerMinutePerProjectPerModel" } }, 429);
     if (mode === "error") return jsonRes({ error: { code: 500, message: "internal" } }, 500);
+    if (prompt.startsWith("Write one TL;DR")) { // the digest's thread TL;DRs
+      const threads = [...prompt.matchAll(/<thread ref="(\d+)">\n<title>([^<]*)<\/title>\n([\s\S]*?)\n<\/thread>/g)];
+      const results = threads.map(([, ref, title, posts]) => ({ ref, summary: `${title}: ${posts.split("<post>").length - 1} posts summed up.` }));
+      return jsonRes({ candidates: [{ content: { parts: [{ text: JSON.stringify({ results }) }] }, finishReason: "STOP" }] });
+    }
     const items = [...prompt.matchAll(/<item ref="(\d+)"[^>]*forum_verified="(true|false)"[^>]*>\n<title>([^<]*)<\/title>\n<content>\n([\s\S]*?)\n<\/content>/g)];
     const results = items.map(([, ref, verified, title, content]) => ({ ref, ...judge(title, content, verified === "true") }));
     return jsonRes({ candidates: [{ content: { parts: [{ text: JSON.stringify({ results }) }] }, finishReason: "STOP" }] });
@@ -708,6 +713,8 @@ try {
   ok("sweeper re-queues work whose queue message was lost");
 
   // 12. Digest: not before 5 PM Pacific; Discord fails at 5:00; retried at 5:05; sent once.
+  // Earlier tests' alerts share the bulk items' small topic ids; out of the way, or they'd join those threads (12j).
+  await db.prepare("UPDATE events SET digest_state = 'sent' WHERE critical = 1 AND digest_state IS NULL").run();
   const bulk = [];
   for (let i = 0; i < 40; i++) {
     const news = i % 4 === 0;
@@ -758,11 +765,21 @@ try {
     .bind(JSON.stringify({ name, ids, state }), `-${ageMin} minutes`).run();
   const digestDay = async () => (await db.prepare("SELECT value FROM kv WHERE key = 'digest:last'").first())?.value ?? null;
   await nextDigestDay();
-  await queueBulk(510, "big");
+  // A sent alert whose thread's only queued post (big-late, the newest) is past the limit: never shown
+  // on its own, not counted.
+  await db.batch([
+    db.prepare(`INSERT INTO events (id, doc_key, kind, source, title, url, author, content, state, relevant, critical, category, summary, alert_state, created_at)
+      VALUES ('big-alert', 'x', 'new', 'Blue Post (US)', 'Big alert', 'https://us.forums.blizzard.com/en/wow/t/big/9999/2', 'Kaivax', 'Body.', 'done', 1, 1, 'Developer Blue Post', '', 'sent', datetime('now', '-1 hour'))`),
+    db.prepare(`INSERT INTO events (id, doc_key, kind, source, title, url, author, content, state, relevant, critical, category, summary, digest_state, created_at)
+      VALUES ('big-late', 'x', 'new', 'Blue Post (US)', 'Big late', 'https://us.forums.blizzard.com/en/wow/t/big/9999/1', 'Kaivax', 'Body.', 'done', 1, 0, 'Developer Blue Post', '', 'queued', datetime('now', '+1 minute'))`)
+  ]);
+  await queueBulk(509, "big");
   d0 = world.discord.length;
   await poll(pt("17:00"));
   assert.equal(world.discord.length, d0 + 1, "one message");
   assert.equal(world.discord.at(-1).content, "510 updates today");
+  assert.ok(!JSON.stringify(world.discord.at(-1)).includes("Big alert"));
+  assert.equal((await events("id = 'big-alert'"))[0].digest_state, null);
   assert.match(world.discord.at(-1).embeds.at(-1).description, /…and \d+ more updates$/);
   assert.equal((await events("digest_state = 'queued'")).length, 0, "everything counted is marked sent");
   await poll(pt("17:05"));
@@ -886,6 +903,45 @@ try {
   assert.equal(await digestDay(), "2026-11-03", "completing the 11-01 digest doesn't move the day back");
   ok("digest: the 'sent' day only moves forward");
   await db.prepare("UPDATE events SET digest_state = 'sent' WHERE digest_state = 'queued'").run();
+  await nextDigestDay();
+
+  // 12j. Posts of one thread are one digest item; an alert joins only a thread that has a queued post.
+  // topic: 9001 unless given; alert: "sent" / "pending" (critical), or null (a queued digest post).
+  const threadPost = (id, n, alert, summary, topic = 9001) => db.prepare(`INSERT INTO events (id, doc_key, kind, source, title, url, author, content, state, relevant, critical, category, summary, alert_state, digest_state)
+    VALUES (?, 'x', 'new', 'Blue Post (US)', ?, ?, 'Kaivax', 'Body.', 'done', 1, ?, 'Developer Blue Post', ?, ?, ?)`)
+    .bind(id, "Faction Balance", `https://us.forums.blizzard.com/en/wow/t/faction-balance/${topic}/${n}`, alert ? 1 : 0, summary, alert, alert ? null : "queued");
+  await db.batch([
+    threadPost("thr-1", 1, "sent", "Character creation limited."),
+    threadPost("thr-158", 158, null, "Trials had no impact."),
+    threadPost("thr-174", 174, "sent", "Zone populations lowered."),
+    threadPost("thr-pending", 180, "pending", "Alert not posted yet: never in the digest before its own post."),
+    threadPost("lone-alert", 1, "sent", "Alert with no queued post in its thread.", 9002)
+  ]);
+  d0 = world.discord.length;
+  // Discord refuses the first try; the retry shows the same thread TL;DR without asking Gemini again
+  // (other servers' channels may already have the first version).
+  world.discordFailNext = 1;
+  world.discordFailStatus = 400;
+  await poll(pt("17:00"));
+  world.discordFailStatus = 500;
+  assert.equal(world.discord.length, d0);
+  const gem12j = world.geminiCalls.length;
+  assert.equal(world.geminiModels.at(-1), "gemini-3.5-flash-lite", "thread TL;DRs come from the main model only");
+  await poll(pt("17:05"));
+  assert.equal(world.geminiCalls.length, gem12j, "the retry reuses the day's thread TL;DR");
+  assert.equal(world.discord.length, d0 + 1);
+  const grouped = world.discord.at(-1);
+  assert.equal(grouped.content, "3 updates today", "the lone alert stays out");
+  assert.equal(grouped.embeds[0].description,
+    "**[Faction Balance](https://us.forums.blizzard.com/en/wow/t/9001/1)** · 3 posts\n" +
+    "> Faction Balance: 3 posts summed up.\n" +
+    "[#1](https://us.forums.blizzard.com/en/wow/t/9001/1) · [#158](https://us.forums.blizzard.com/en/wow/t/9001/158) · [#174](https://us.forums.blizzard.com/en/wow/t/9001/174)",
+    "one TL;DR for the whole thread, from one Gemini call");
+  const tldrCall = world.geminiCalls.at(-1);
+  assert.ok(tldrCall.startsWith("Write one TL;DR") && /<post>\nBody\.\nTL;DR: Trials had no impact\.\n<\/post>/.test(tldrCall), "the model sees each post's text, then its TL;DR");
+  assert.deepEqual((await events("id LIKE 'thr-%' OR id = 'lone-alert'")).map(e => [e.id, e.digest_state]).sort(),
+    [["lone-alert", null], ["thr-1", "sent"], ["thr-158", "sent"], ["thr-174", "sent"], ["thr-pending", null]], "alerts shown in a thread aren't shown again");
+  ok("digest: a thread's posts are one item; its alerts come along only beside a queued post");
   await nextDigestDay();
 
   // /status shows a digest in progress.
@@ -1108,6 +1164,26 @@ try {
     await poll(pt("17:10")); await settle();
     assert.equal(sentTo(A2, d0).length, 1, "one digest a day");
     ok("fan-out: the daily digest goes to every channel once, without pings");
+
+    // The owner's channel refuses the digest (4xx): other channels get nothing yet, and the retry (which
+    // may build a different digest) is what every channel gets, once.
+    await db.prepare("DELETE FROM deliveries WHERE broadcast_id LIKE 'digest:%'").run();
+    await db.prepare("DELETE FROM broadcasts WHERE id LIKE 'digest:%'").run();
+    await db.prepare("DELETE FROM kv WHERE key IN ('digest:last', 'digest:inflight')").run();
+    world.usTracker = [...world.usTracker, forumPost({ region: "us", categoryId: 348, title: "Skyborne refused-digest notes", text: "More Skyborne thoughts.", topicId: 9104 })];
+    await poll(); await settle();
+    d0 = world.discord.length;
+    world.discordFailNext = 1;
+    world.discordFailStatus = 400;
+    await poll(pt("17:00")); await settle();
+    world.discordFailStatus = 500;
+    assert.equal(sentTo(A2, d0).length, 0, "nothing in other channels while the owner's channel refuses it");
+    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM broadcasts WHERE id LIKE 'digest:%' AND id = ?").bind(`digest:${digestToday}`).first()).n, 0, "the unsent version is removed");
+    await poll(pt("17:05")); await settle();
+    const ownerRetry = sentTo("1", d0).filter(m => /updates? today$/.test(m.content ?? ""));
+    assert.deepEqual([ownerRetry.length, sentTo(A2, d0).length], [1, 1]);
+    assert.deepEqual(sentTo(A2, d0)[0].embeds, ownerRetry[0].embeds, "the same digest everywhere");
+    ok("fan-out: a digest the owner's channel refused reaches other channels only as the version that's posted");
 
     // A digest Discord rate-limited (429) wasn't posted: it's retried. After a 5xx it may have been: never again.
     const digestAgain = async (topicId, fail) => {

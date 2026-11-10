@@ -7,7 +7,7 @@
  */
 
 import {
-  GEMINI_BACKUP_MODEL, GEMINI_BATCH_CHARS, GEMINI_DEFAULT_MODEL, GEMINI_MODEL_SETTINGS, GEMINI_UNLISTED_MODEL_SETTINGS,
+  DIGEST_TLDR_TIMEOUT_MS, GEMINI_BACKUP_MODEL, GEMINI_BATCH_CHARS, GEMINI_DEFAULT_MODEL, GEMINI_MODEL_SETTINGS, GEMINI_UNLISTED_MODEL_SETTINGS,
   LLM_PAUSE_DAILY_QUOTA_MIN, LLM_PAUSE_OVERLOAD_MIN, LLM_PAUSE_RATE_LIMIT_MIN,
   WORKERS_AI_DEFAULT_MODEL, WORKERS_AI_ITEM_CHARS
 } from "../config";
@@ -16,7 +16,7 @@ import type { Classification } from "../lib/classify";
 import { clip } from "../lib/text";
 import type { Env, ThinkingLevel } from "../types";
 import { LlmError } from "./errors";
-import { classifyWithGemini } from "./gemini";
+import { classifyWithGemini, summarizeThreadsWithGemini } from "./gemini";
 import type { PromptItem } from "./prompt";
 import { classifyWithWorkersAi } from "./workersAi";
 
@@ -59,6 +59,28 @@ export function pauseMinutes(err: unknown): number {
 async function pause(db: D1Database, key: string, err: unknown): Promise<void> {
   const min = pauseMinutes(err);
   if (min > 0) await kvSet(db, key, new Date(Date.now() + min * 60_000).toISOString());
+}
+
+/**
+ * The digest's thread TL;DRs, by thread index, from the main Gemini model only, kept under
+ * DIGEST_TLDR_TIMEOUT_MS. It's optional polish, so it never takes the backup's (smaller) quota from
+ * alerts, never pauses a model (a short digest timeout isn't an outage), and never throws: a thread
+ * without a TL;DR is shown post by post instead.
+ */
+export async function summarizeThreads(env: Env, threads: { title: string; posts: string[] }[]): Promise<Map<number, string>> {
+  if (!threads.length || !env.GEMINI_API_KEY) return new Map();
+  const { provider, model, timeoutMs, thinking } = geminiModels(env)[0];
+  try {
+    const until = (await kvGetMany(env.DB, [geminiPauseKey(model)])).get(geminiPauseKey(model))?.value;
+    if (until && Date.parse(until) > Date.now()) return new Map();
+    const got = await summarizeThreadsWithGemini(threads, env.GEMINI_API_KEY, model, Math.min(timeoutMs, DIGEST_TLDR_TIMEOUT_MS), thinking);
+    await bumpCounter(env.DB, `calls:${provider}`).catch(() => {});
+    return got;
+  } catch (err) {
+    console.warn(`Digest thread TL;DRs from ${model} failed:`, err instanceof Error ? err.message : String(err));
+    await bumpCounter(env.DB, `failed:${model}`).catch(() => {});
+    return new Map();
+  }
 }
 
 export async function classifyItems(env: Env, items: PromptItem[]): Promise<ChainResult> {

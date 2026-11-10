@@ -13,6 +13,23 @@ export interface DigestRow {
   content: string; // the text that was classified (for an edit, marked with [NEW] lines)
 }
 
+/** Posts of one forum topic share a key (host + topic id); anything else is keyed by its own URL. */
+export function threadKey(url: string): string {
+  const m = url.match(/^(https:\/\/[a-z]{2}\.forums\.blizzard\.com)\/[a-z]{2}\/wow\/t\/[^/]+\/(\d+)\/\d+$/i);
+  return m ? `${m[1].toLowerCase()}/t/${m[2]}` : url;
+}
+
+/** Rows by thread, each thread where its first row was. */
+export function groupByThread<T extends { url: string }>(rows: T[]): Map<string, T[]> {
+  const out = new Map<string, T[]>();
+  for (const r of rows) {
+    const k = threadKey(r.url);
+    const list = out.get(k);
+    if (list) list.push(r); else out.set(k, [r]);
+  }
+  return out;
+}
+
 /** Discord caps the combined text of all embeds in one message at 6000 characters. */
 export const DISCORD_EMBED_TOTAL_LIMIT = 6000;
 const EMBED_DESCRIPTION_LIMIT = 4096;
@@ -143,19 +160,46 @@ function shareBudget(needs: number[], budget: number): number[] {
  * much of the post as fits: the 6000-character budget is shared so short posts appear in full and
  * long ones are cut at a sentence end. On a busier day excerpts go first, then TL;DRs; if even the
  * linked titles don't all fit, the rest are counted in a closing "…and N more updates" line, along
- * with `extra` items the caller didn't load.
+ * with `extra` items the caller didn't load. Posts of one forum thread (or versions of one article)
+ * are one item: the title once, then `threadTldr`'s one TL;DR for the thread (by threadKey) and a link
+ * to each post, or without it a line per post.
  */
-export function buildDigestMessage(rows: DigestRow[], opts: { extra?: number } = {}): { payload: Record<string, unknown>; shown: number } {
+export function buildDigestMessage(rows: DigestRow[], opts: { extra?: number; threadTldr?: Map<string, string> } = {}): { payload: Record<string, unknown>; shown: number } {
   const extra = Math.max(0, opts.extra ?? 0);
   const count = rows.length + extra;
-  const items = rows.map(r => {
-    const { video, text } = splitVideo(r.content);
+  const oneLine = (s: string) => s.replace(/\s+/g, " ").trim();
+  // Each line without its heading, list or quote prefix, to run together into one paragraph.
+  const bodyOf = (text: string) => text.split("\n").map(l => inlineMarkdown(l.trim())).filter(Boolean).join("\n");
+  const items = [...groupByThread(rows)].map(([key, posts]) => {
+    const r = posts[0];
+    const news = r.source === "Blizzard News";
+    if (posts.length === 1) {
+      const { video, text } = splitVideo(r.content);
+      return {
+        news, n: 1,
+        head: `**[${linkText(r.title)}](${linkUrl(shortLink(r.url))})**${video ? ` · [▶ Video](${video})` : ""}`,
+        tldr: r.summary?.trim() ? `> ${escapeMarkdown(clip(oneLine(r.summary), 300))}` : "", // a one-line quote box
+        body: bodyOf(text)
+      };
+    }
+    // A thread: its title once, then its one TL;DR for all the posts and a link to each; without that
+    // TL;DR, one quote line per post (a link, then its TL;DR or else the start of the post).
+    const label = (p: DigestRow) => {
+      const edit = p.content?.startsWith(UPDATE_MARKER);
+      const num = p.url.match(/\/(\d+)$/)?.[1];
+      return news ? (edit ? "Update" : "Article") : `#${num ?? "?"}${edit ? " (edited)" : ""}`;
+    };
+    const link = (p: DigestRow) => `[${label(p)}](${linkUrl(shortLink(p.url))})`;
+    const line = (p: DigestRow) => {
+      const gist = p.summary?.trim() ? escapeMarkdown(clip(oneLine(p.summary), 200)) : cutAtSentence(bodyOf(splitVideo(p.content).text), 200).text.replace(/\n/g, " ");
+      return `> ${link(p)} ${gist}`.trimEnd();
+    };
+    const summary = opts.threadTldr?.get(key)?.trim();
     return {
-      news: r.source === "Blizzard News",
-      head: `**[${linkText(r.title)}](${linkUrl(shortLink(r.url))})**${video ? ` · [▶ Video](${video})` : ""}`,
-      tldr: r.summary?.trim() ? `> ${escapeMarkdown(clip(r.summary.replace(/\s+/g, " ").trim(), 300))}` : "", // a one-line quote box
-      // Each line without its heading, list or quote prefix, to run together into one paragraph.
-      body: text.split("\n").map(l => inlineMarkdown(l.trim())).filter(Boolean).join("\n")
+      news, n: posts.length,
+      head: `**[${linkText(r.title.replace(/ \((?:edited|updated)\)$/, ""))}](${linkUrl(shortLink(r.url))})** · ${posts.length} ${news ? "versions" : "posts"}`,
+      tldr: summary ? `> ${escapeMarkdown(clip(oneLine(summary), 300))}\n${posts.map(link).join(" · ")}` : posts.map(line).join("\n"),
+      body: ""
     };
   });
   const groups = [false, true]; // Blue Posts, then news
@@ -211,7 +255,7 @@ export function buildDigestMessage(rows: DigestRow[], opts: { extra?: number } =
       if (withTldr && it.body && (it.body.length <= room || room >= MIN_EXCERPT_CHARS)) parts.push(cutAtSentence(it.body, room).text.replace(/\n/g, " "));
       return parts.join("\n");
     });
-    return { payload: digestPayload(count, render(texts, extra)), shown: items.length };
+    return { payload: digestPayload(count, render(texts, extra)), shown: rows.length };
   }
 
   // 4: as many linked titles as fit, in order; the rest counted. A full embed doesn't stop the
@@ -227,7 +271,7 @@ export function buildDigestMessage(rows: DigestRow[], opts: { extra?: number } =
     texts[i] = it.head;
     used += cost;
     usedIn[String(it.news)] += cost;
-    shown++;
+    shown += it.n;
   }
   return { payload: digestPayload(count, render(texts, count - shown)), shown };
 }

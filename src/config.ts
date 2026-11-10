@@ -94,6 +94,13 @@ export const DIGEST_HOUR = 17;
 /** The digest is one message: at most this many items are loaded into it; any more are only counted
  * ("…and N more updates") and marked sent with the rest. */
 export const DIGEST_MAX_ITEMS = 500;
+/** For the digest's thread TL;DRs (main Gemini model only): well under the 2 minutes after which
+ * another run may take over a digest in progress. */
+export const DIGEST_TLDR_TIMEOUT_MS = 25_000;
+/** The thread TL;DR request: each post's share, and the whole request's limit (cron CPU, Gemini
+ * tokens per minute); threads past it are shown post by post. */
+export const THREAD_POST_CHARS = 2000;
+export const THREAD_PROMPT_CHARS = 30_000;
 export const EVENT_RETENTION_DAYS = 45;
 export const DOC_RETENTION_DAYS = 180;
 export const HEALTH_MAX_FAILURES = 12;        // 1 hour of consecutive errors

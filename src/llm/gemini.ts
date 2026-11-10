@@ -1,10 +1,10 @@
-/** Gemini batch classification. Pure fetch, so scripts/eval can run it from Node too. */
+/** Gemini batch classification and the digest's thread TL;DRs. Pure fetch, so scripts/eval can run it from Node too. */
 
 import { fetchWithTimeout } from "../http";
 import { Classification, sanitizeClassification } from "../lib/classify";
 import { clip } from "../lib/text";
 import { LlmError } from "./errors";
-import { GEMINI_BATCH_SCHEMA, PromptItem, SYSTEM_PROMPT, renderItem } from "./prompt";
+import { GEMINI_BATCH_SCHEMA, GEMINI_THREAD_SCHEMA, PromptItem, SYSTEM_PROMPT, THREAD_PROMPT, renderItem, renderThread } from "./prompt";
 import type { ThinkingLevel } from "../types";
 
 /** A thinking level from a setting, or the default if it isn't one. */
@@ -17,18 +17,43 @@ export function thinkingLevel(value: string | undefined, fallback: ThinkingLevel
 export async function classifyWithGemini(
   items: PromptItem[], apiKey: string, model: string, timeoutMs = 45_000, thinking: ThinkingLevel = "low"
 ): Promise<Map<number, Classification>> {
+  const text = await generate(apiKey, model, timeoutMs, thinking, SYSTEM_PROMPT, GEMINI_BATCH_SCHEMA,
+    `Classify these ${items.length} items. Return exactly one result per item, echoing its ref.\n\n${items.map((it, i) => renderItem(it, i)).join("\n\n")}`);
+  const out = new Map<number, Classification>();
+  for (const r of JSON.parse(text)?.results ?? []) {
+    const idx = refIndex(r?.ref);
+    const cls = sanitizeClassification(r);
+    if (Number.isInteger(idx) && idx >= 0 && idx < items.length && cls) out.set(idx, cls);
+  }
+  return out;
+}
+
+/** One TL;DR per thread, by thread index. Threads missing from the answer (or left blank) are left out. */
+export async function summarizeThreadsWithGemini(
+  threads: { title: string; posts: string[] }[], apiKey: string, model: string, timeoutMs: number, thinking: ThinkingLevel
+): Promise<Map<number, string>> {
+  const text = await generate(apiKey, model, timeoutMs, thinking, THREAD_PROMPT, GEMINI_THREAD_SCHEMA,
+    `Write one TL;DR for each of these ${threads.length} threads, echoing its ref.\n\n${threads.map((t, i) => renderThread(t, i)).join("\n\n")}`);
+  const out = new Map<number, string>();
+  for (const r of JSON.parse(text)?.results ?? []) {
+    const idx = refIndex(r?.ref);
+    const summary = typeof r?.summary === "string" ? clip(r.summary.trim(), 300) : "";
+    if (Number.isInteger(idx) && idx >= 0 && idx < threads.length && summary) out.set(idx, summary);
+  }
+  return out;
+}
+
+/** One JSON-mode request; returns the answer's text. */
+async function generate(apiKey: string, model: string, timeoutMs: number, thinking: ThinkingLevel, system: string, schema: unknown, user: string): Promise<string> {
   const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
   const payload = {
-    systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-    contents: [{
-      role: "user",
-      parts: [{ text: `Classify these ${items.length} items. Return exactly one result per item, echoing its ref.\n\n${items.map((it, i) => renderItem(it, i)).join("\n\n")}` }]
-    }],
+    systemInstruction: { parts: [{ text: system }] },
+    contents: [{ role: "user", parts: [{ text: user }] }],
     generationConfig: {
       // Gemini 3.x: sampling parameters (temperature/top_p/top_k) are deprecated; leave them unset.
       thinkingConfig: { thinkingLevel: thinking },
       responseMimeType: "application/json",
-      responseSchema: GEMINI_BATCH_SCHEMA
+      responseSchema: schema
     }
   };
 
@@ -50,14 +75,7 @@ export async function classifyWithGemini(
     .map((p: any) => p.text)
     .join("");
   if (!text) throw new LlmError(`Gemini ${model} returned empty text (finishReason: ${candidate.finishReason ?? "unknown"})`, "other");
-
-  const out = new Map<number, Classification>();
-  for (const r of JSON.parse(text)?.results ?? []) {
-    const idx = Number(r?.ref);
-    const cls = sanitizeClassification(r);
-    if (Number.isInteger(idx) && idx >= 0 && idx < items.length && cls) out.set(idx, cls);
-  }
-  return out;
+  return text;
 }
 
 /** The request and its body read, under one timeout. */
@@ -77,4 +95,10 @@ async function post(endpoint: string, apiKey: string, payload: unknown, model: s
     throw new LlmError(`Gemini ${model} HTTP ${res.status}: ${clip(text, 300)}`, res.status === 503 || res.status === 500 ? "overloaded" : "other");
   }
   return res.json();
+}
+
+/** A result's ref as an index; anything but digits (Number("") and Number(null) are 0) is NaN. */
+function refIndex(ref: unknown): number {
+  const s = typeof ref === "string" || typeof ref === "number" ? String(ref).trim() : "";
+  return /^\d+$/.test(s) ? Number(s) : NaN;
 }

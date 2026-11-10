@@ -3,7 +3,7 @@
 A Discord notifier for **World of Warcraft: Forever**. It watches Blizzard's US forums and the Blizzard news site, uses Gemini to decide what matters, and posts to a Discord channel:
 
 - **Alerts, right away,** for anything urgent: hotfixes, known issues, maintenance. When a watched post or article is edited, the new lines go through the same triage.
-- **A daily digest** of everything else that's relevant, at 5 PM Pacific.
+- **A daily digest** of everything else that's relevant, at 5 PM Pacific. Several blue posts in one thread are one entry with one TL;DR for all of them; an alerted post joins its thread there when the thread also has other posts that day.
 
 Each alert and digest item comes with a short TL;DR written by the model. Optionally, a public page lets other people add the same alerts to a channel in their own Discord server (see [Let other servers add it](#let-other-servers-add-it-optional)).
 

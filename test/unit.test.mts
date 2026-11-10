@@ -8,7 +8,7 @@ import { pickForeverCategories, flattenCategoryList, parseTracker, parseSearch, 
 import { heuristicClassify, sanitizeClassification } from "../src/lib/classify.ts";
 import { parseRoleInput, readOAuthWebhook, roleNoticePayload, welcomePayload, withRole, webhookUrl } from "../src/lib/discord.ts";
 import { htmlEscape, landingPage, managePage, messagePage } from "../src/lib/pages.ts";
-import { buildDigestMessage, buildAlertPayload, cutAtSentence, shortLink, embedTextLength, DISCORD_EMBED_TOTAL_LIMIT, DIGEST_BLUE_POST_COLOR, DIGEST_NEWS_COLOR, ALERT_COLOR } from "../src/lib/discord.ts";
+import { buildDigestMessage, buildAlertPayload, cutAtSentence, shortLink, threadKey, embedTextLength, DISCORD_EMBED_TOTAL_LIMIT, DIGEST_BLUE_POST_COLOR, DIGEST_NEWS_COLOR, ALERT_COLOR } from "../src/lib/discord.ts";
 import { fingerprintNew, fingerprintEdit } from "../src/lib/fingerprint.ts";
 import { initialWatchTier } from "../src/poller.ts";
 import { forumRegions, wantedNewsTitle } from "../src/sources.ts";
@@ -618,6 +618,33 @@ fits(dMany.payload);
 const goldBox = (dMany.payload as any).embeds.find((e: any) => e.color === DIGEST_NEWS_COLOR);
 assert.ok(goldBox && goldBox.description.includes("[News 104]"), "news is still listed when the Blue Post box is full");
 ok("buildDigestMessage: one message, blue/gold embeds, linked titles, TL;DR + post sized to fit");
+
+// Threads: one item per forum topic (slug ignored, US and EU apart); news by article URL.
+assert.equal(threadKey("https://us.forums.blizzard.com/en/wow/t/pvp-faction-balance/2408781/158"), "https://us.forums.blizzard.com/t/2408781");
+assert.equal(threadKey("https://us.forums.blizzard.com/en/wow/t/renamed-slug/2408781/1"), "https://us.forums.blizzard.com/t/2408781");
+assert.notEqual(threadKey("https://eu.forums.blizzard.com/en/wow/t/x/2408781/1"), threadKey("https://us.forums.blizzard.com/en/wow/t/x/2408781/1"));
+assert.equal(threadKey("https://news.blizzard.com/en-us/article/1/x"), "https://news.blizzard.com/en-us/article/1/x");
+const reply = (n: number, summary: string, extra: object = {}) => ({ ...blue(5, "Reply body. More text.", summary), id: `r${n}`, title: "Thread 900", url: `https://us.forums.blizzard.com/en/wow/t/t/900/${n}`, ...extra });
+const threadRows = [reply(1, "First."), blue(6, "Other topic."), reply(9, "", { title: "Thread 900 (edited)", content: `${UPDATE_MARKER}\n[NEW] Added line.` })];
+const otherItem = "\n\n**[Blue post 6](https://us.forums.blizzard.com/en/wow/t/6/1)**\n> TL;DR 6.\nOther topic.";
+// The thread's one TL;DR (escaped, one line), then a link to each post.
+const dThread = buildDigestMessage(threadRows, { threadTldr: new Map([[threadKey(threadRows[0].url), "Both *posts*\nsummed up. Second sentence."]]) });
+fits(dThread.payload);
+assert.equal((dThread.payload as any).content, "3 updates today", "every post still counts");
+assert.equal((dThread.payload as any).embeds[0].description,
+  "**[Thread 900](https://us.forums.blizzard.com/en/wow/t/900/1)** · 2 posts\n> Both \\*posts\\* summed up. Second sentence.\n[#1](https://us.forums.blizzard.com/en/wow/t/900/1) · [#9 (edited)](https://us.forums.blizzard.com/en/wow/t/900/9)" +
+  otherItem, "the thread sits where its first post was");
+assert.equal(dThread.shown, 3);
+// No thread TL;DR (the model failed): a line per post, its TL;DR or else its start.
+assert.equal((buildDigestMessage(threadRows).payload as any).embeds[0].description,
+  "**[Thread 900](https://us.forums.blizzard.com/en/wow/t/900/1)** · 2 posts\n> [#1](https://us.forums.blizzard.com/en/wow/t/900/1) First.\n> [#9 (edited)](https://us.forums.blizzard.com/en/wow/t/900/9) Added line." + otherItem);
+// Titles only (stage 4): a shown thread counts all its posts, so "…and N more" stays right.
+const threadFlood = [...Array.from({ length: 5 }, (_, i) => reply(i + 1, "x")), ...flood];
+const dThreadFlood = buildDigestMessage(threadFlood);
+fits(dThreadFlood.payload);
+assert.ok((dThreadFlood.payload as any).embeds.at(-1).description.endsWith(`…and ${threadFlood.length - dThreadFlood.shown} more updates`));
+assert.ok(dThreadFlood.shown >= 5 && (dThreadFlood.payload as any).embeds[0].description.startsWith("**[Thread 900](https://us.forums.blizzard.com/en/wow/t/900/1)** · 5 posts"));
+ok("buildDigestMessage: a thread's posts are one item");
 
 // Fingerprints: US/EU crosspost of a new post matches; a different reply doesn't
 const a = await fingerprintNew("Launch Day Known Issues", "We are aware of login queues.  Investigating!");
