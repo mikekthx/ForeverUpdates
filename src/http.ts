@@ -13,10 +13,19 @@ export async function getJson(url: string): Promise<any> {
   return res.json();
 }
 
-export async function getHtml(url: string): Promise<string> {
+export async function getHtml(url: string, hops = 2): Promise<string> {
   const res = await fetchWithTimeout(url, { headers: { "User-Agent": USER_AGENT, Accept: "text/html" } });
-  if (!res.ok) throw new Error(`HTTP ${res.status} from ${url}`);
-  return res.text();
+  if (res.ok) return res.text();
+  // Blizzard's news site (Next.js) answers a renamed article's old URL (its title, so its slug,
+  // changed) with a 307 that has no Location header: the new path is only in the page, as
+  // NEXT_REDIRECT;replace;<path>;307, which a browser follows in JavaScript. Followed here, same site only.
+  if (res.status >= 300 && res.status < 400 && !res.headers.get("location") && hops > 0) {
+    const path = (await res.text()).match(/NEXT_REDIRECT;(?:replace|push);((?:https:\/\/[^/;"\\\s]+)?\/[^;"\\\s]+);30[1278]/)?.[1];
+    let next: URL | null = null;
+    try { next = path ? new URL(path, url) : null; } catch { /* malformed: not followed */ }
+    if (next && next.origin === new URL(url).origin && next.href !== url) return getHtml(next.href, hops - 1);
+  }
+  throw new Error(`HTTP ${res.status} from ${url}`);
 }
 
 export function errMessage(err: unknown): string {

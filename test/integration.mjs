@@ -635,6 +635,15 @@ try {
   await db.prepare("UPDATE events SET digest_state = 'sent' WHERE digest_state = 'queued' AND doc_key IN (?, ?, ?)").bind(spikeId, `post:us:${late.id}`, `post:us:${urgent5c.id}`).run();
   ok("both Gemini models in a 503 spike: a new item waits for Gemini; in a longer outage the pause grows and Workers AI classifies it");
 
+  // 5d. Blizzard renames a news article (its slug changes): the stored URL follows the listing, and the
+  //     article isn't treated as new.
+  const before5d = (await events("doc_key = 'news:2'")).length;
+  world.newsHtml = world.newsHtml.replace('href="/en-us/article/2/x"', 'href="/en-us/article/2/hotfixes-renamed"');
+  await poll(); await settle();
+  assert.equal((await doc("news:2")).url, "https://news.blizzard.com/en-us/article/2/hotfixes-renamed");
+  assert.equal((await events("doc_key = 'news:2'")).length, before5d, "a rename alone is no new event");
+  ok("a renamed news article: its stored URL follows the listing");
+
   // 6. Both Gemini models out of daily quota → Workers AI takes over, and both are paused (not called again).
   world.geminiMode = "daily";
   const q1 = forumPost({ region: "us", categoryId: 348, title: "Layer update", text: "We added layers; queues should improve.", topicId: 6004, postNumber: 2 });

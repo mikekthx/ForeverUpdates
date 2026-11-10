@@ -16,6 +16,7 @@ import { renderItem } from "../src/llm/prompt.ts";
 import { classifyWithGemini, thinkingLevel } from "../src/llm/gemini.ts";
 import { LlmError } from "../src/llm/errors.ts";
 import { geminiModels } from "../src/llm/chain.ts";
+import { getHtml } from "../src/http.ts";
 
 let n = 0; const ok = (name: string) => { n++; console.log("  ✓", name); };
 
@@ -814,6 +815,41 @@ assert.equal(await failure(async () => new Response(`{"error":{"code":400}}`, { 
 assert.equal(await failure(async () => new Response("Quota exceeded for metric: GenerateRequestsPerDayPerProjectPerModel", { status: 429 })), "daily-quota");
 assert.equal(await failure(async () => new Response("Quota exceeded for metric: GenerateRequestsPerMinutePerProjectPerModel", { status: 429 })), "rate-limit");
 ok("classifyWithGemini: overloads and timeouts (anywhere in the request) pause the model; errors name the model");
+
+// getHtml: a renamed news article's old URL is a 307 without Location; the new path is in the page
+// (NEXT_REDIRECT, as seen 2026-11-10). Followed on the same site only, a limited number of times.
+{
+  const shell = (path: string) => `<html><script>self.__next_f.push([1,"NEXT_REDIRECT;replace;${path};307;\\n"])</script></html>`;
+  const seen: string[] = [];
+  const pages: Record<string, Response | (() => Response)> = {};
+  globalThis.fetch = (async (u: string) => { seen.push(u); const p = pages[u]; return typeof p === "function" ? p() : p ?? new Response("nf", { status: 404 }); }) as typeof fetch;
+  try {
+    const base = "https://news.blizzard.com/en-us/article/24315281";
+    pages[`${base}/hotfixes-november-6`] = new Response(shell("/en-us/article/24315281/hotfixes-november-9"), { status: 307 });
+    pages[`${base}/hotfixes-november-9`] = new Response("<article>Nov 9 hotfixes</article>", { status: 200 });
+    assert.equal(await getHtml(`${base}/hotfixes-november-6`), "<article>Nov 9 hotfixes</article>");
+    assert.deepEqual(seen, [`${base}/hotfixes-november-6`, `${base}/hotfixes-november-9`]);
+    pages[`${base}/off-site`] = new Response(shell("//evil.example/x"), { status: 307 });
+    await assert.rejects(getHtml(`${base}/off-site`), /HTTP 307/, "another site's path isn't followed");
+    pages[`${base}/abs`] = new Response(shell(`${base}/hotfixes-november-9`), { status: 307 });
+    pages[`${base}/hotfixes-november-9`] = new Response("<article>Nov 9 hotfixes</article>", { status: 200 });
+    assert.equal(await getHtml(`${base}/abs`), "<article>Nov 9 hotfixes</article>", "an absolute same-site URL is followed");
+    pages[`${base}/a`] = () => new Response(shell("/en-us/article/24315281/b"), { status: 307 });
+    pages[`${base}/b`] = () => new Response(shell("/en-us/article/24315281/a"), { status: 307 });
+    await assert.rejects(getHtml(`${base}/a`), /HTTP 307/, "a redirect loop stops");
+    seen.length = 0;
+    pages[`${base}/self`] = () => new Response(shell("/en-us/article/24315281/self"), { status: 307 });
+    await assert.rejects(getHtml(`${base}/self`), /HTTP 307/);
+    assert.equal(seen.length, 1, "a page redirecting to itself isn't fetched again");
+    pages[`${base}/bad`] = new Response(shell("//"), { status: 307 });
+    await assert.rejects(getHtml(`${base}/bad`), /HTTP 307/, "a malformed path: the HTTP error, not a URL TypeError");
+    pages[`${base}/gone`] = new Response("<html>no redirect here</html>", { status: 307 });
+    await assert.rejects(getHtml(`${base}/gone`), /HTTP 307/);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+ok("getHtml: follows a Next.js page redirect (307 without Location) on the same site only");
 
 // Thinking level settings (EVAL_THINKING): Gemini 3.x has low|medium|high
 assert.equal(thinkingLevel(undefined, "high"), "high");
