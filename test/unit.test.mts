@@ -151,6 +151,21 @@ assert.equal(h2.is_critical, true);
 assert.equal(h2.summary, "");
 assert.equal(updateFocus("no marker"), null);
 assert.equal(updateFocus(`${UPDATE_MARKER}\nhttps://youtu.be/bzaMA5fZ1tE\n[NEW] Realms restart tonight.`)!.withHeaders, "Realms restart tonight.", "a video link isn't a section header");
+// Shown text keeps the header lines right above each new line, never other unchanged text.
+const hotfixEdit = edited([
+  "Intro paragraph.", "[NEW] **November 10, 2026**", "[NEW] - Fixed mail delivery.", "**Classes**", "- **Hunter**",
+  "[NEW]   - Pets have 115% health.", "- Old short fix.", "[NEW] - Late fix.", "Old line 1.", "## Professions", "- **Mining**",
+  "[NEW]   - Ore respawns faster.", "**November 9, 2026**"
+].join("\n"));
+assert.equal(updateFocus(hotfixEdit)!.shown,
+  "**November 10, 2026**\n- Fixed mail delivery.\n**Classes**\n- **Hunter**\n  - Pets have 115% health.\n- Late fix.\n## Professions\n- **Mining**\n  - Ore respawns faster.");
+assert.equal(updateFocus(edited("**Known Issues**\n- Old issue.\n**Quests**\n[NEW] - A quest giver is missing."))!.shown,
+  "**Quests**\n- A quest giver is missing.", "a fix added under an existing header keeps that header");
+assert.equal(updateFocus(edited("**Classes**\n- **Hunter**\n  - Old fix.\n[NEW]   - New fix.\n  - Older fix.\n[NEW]   - Another fix."))!.shown,
+  "**Classes**\n- **Hunter**\n  - New fix.\n  - Another fix.", "headers above older fixes in the section still show, once");
+const hotfixAlert = (buildAlertPayload({ title: "t", url: "https://e/x", content: hotfixEdit, summary: "" }, {}) as any).embeds[0].description;
+assert.ok(hotfixAlert.includes("**Classes**\n\n- **Hunter**\n  - Pets have 115% health.") && !hotfixAlert.includes("Old short fix") && !hotfixAlert.includes("Intro"), "the alert shows it too");
+assert.equal(updateFocus(hotfixEdit)!.newText.includes("Classes"), false, "the model still judges only [NEW] lines");
 ok("heuristicClassify judges edits by their [NEW] lines and section headers only");
 
 // Categories: EU-style IDs, beta child excluded, unrelated categories ignored
@@ -671,8 +686,33 @@ const e1 = await fingerprintEdit("WoW: Forever Known Issues", ["Some quest giver
 const e2 = await fingerprintEdit("WoW: Forever Known Issues", ["Login queues on Normal realms are longer than expected."]);
 const e1eu = await fingerprintEdit("WoW: Forever Known Issues", ["Some quest givers are missing in Zephras Isle."]);
 assert.notEqual(e1, e2); assert.equal(e1, e1eu);
-assert.notEqual(await fingerprintNew("T", intro), e1, "new and edit fingerprints never collide");
+assert.notEqual(await fingerprintNew("T", intro), e1, "short new and edit fingerprints never collide");
 ok("fingerprintEdit: successive edits differ, US/EU copies of an edit match");
+
+// The same hotfix notes as a new forum reply and as lines added to the news article match, though
+// titles differ and the article's edit drops headers it already had ("Classes", "Druid").
+const fixes = [
+  "Adjusted the minimum deposit amount to 1 copper (was 1 silver).",
+  "Fixed a bug causing unread mail to incorrectly read as from Stormwind Auction House.",
+  "Fixed a bug that was causing some mail to be delivered in about 2 minutes."
+];
+const reply6 = await fingerprintNew("WoW: Forever Hotfixes - November 10, 2026",
+  ["https://youtu.be/bzaMA5fZ1tE", "**November 10, 2026**", "**Auction House**", ...fixes.slice(0, 2).map(f => `- ${f}`), "**Classes**", "- **Druid**", `  - ${fixes[2]}`].join("\n"));
+assert.equal(reply6, await fingerprintEdit("WoW Forever Hotfixes", ["**November 10, 2026**", ...fixes.map(f => `- ${f}`)]), "headers and the video link don't count");
+// Shared boilerplate isn't enough: any other differing line, even a short date, keeps posts apart.
+assert.notEqual(reply6, await fingerprintEdit("WoW Forever Hotfixes", ["**November 10, 2026**", ...fixes, "Fixed an issue where Omen of Clarity could not activate."]));
+const maint = (when: string) => fingerprintNew("Maintenance", [
+  "We will be performing scheduled maintenance during the following window.", when,
+  "During this maintenance, the game will be unavailable for all players.", "Please follow our support account for updates on the maintenance."
+].join("\n"));
+assert.notEqual(await maint("Tuesday, Nov 10, 07:00 - 08:00 PST"), await maint("Thursday, Nov 12, 07:00 - 09:00 PST"));
+assert.notEqual(await maint("**November 10, 2026**"), await maint("**November 12, 2026**"), "a bold date counts");
+assert.notEqual(await maint("**Realms are offline now while we restart them.**"), await maint("**Realms will restart tomorrow morning instead.**"), "a long bold line counts");
+assert.notEqual(await maint("**Maintenance is extended.**"), await maint("**Maintenance is complete.**"), "a short bold sentence counts");
+// Known limit: a bold line of up to 3 words, without digits or end punctuation, reads as a section name.
+assert.equal(await maint("**Extended**"), await maint("**Hunter**"));
+assert.notEqual(await maint("https://example.com/status/1"), await maint("https://example.com/status/2"), "only a leading link is ignored");
+ok("fingerprints: a reply and a news edit with the same long lines match");
 
 // Probe: unaffected by related-article cards and page chrome; changes when the article changes
 const pageA = (body: string, related: string) => `<html><nav>menu ${related}</nav><article><h1>Hotfixes</h1>${body}<article><p>embed</p></article></article><aside><article>${related}</article></aside></html>`;

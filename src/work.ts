@@ -141,7 +141,7 @@ export async function processFetch(env: Env, key: string, baseline: boolean, att
   if (isNew) {
     event = {
       id: recovering ? `${key}@full` : `${key}@new`,
-      kind: "new", title, content: clipMarkdown(text, maxContent), fingerprint: await fingerprintNew(title, stripMarkdown(text))
+      kind: "new", title, content: clipMarkdown(text, maxContent), fingerprint: await fingerprintNew(title, text)
     };
   } else {
     const { added, marked } = markAddedLines(doc.body!, text);
@@ -157,7 +157,7 @@ export async function processFetch(env: Env, key: string, baseline: boolean, att
       kind: "edit",
       title: `${title} (${doc.kind === "post" ? "edited" : "updated"})`,
       content: clipMarkdown(`${UPDATE_MARKER}\n${marked}`, maxContent),
-      fingerprint: await fingerprintEdit(title, added.map(stripMarkdown))
+      fingerprint: await fingerprintEdit(title, added)
     };
   }
 
@@ -176,7 +176,8 @@ export async function processFetch(env: Env, key: string, baseline: boolean, att
 
   // US/EU crossposts: the duplicate check runs inside the INSERT, so two consumers handling the US
   // and EU copies at the same moment can't both see "no duplicate yet" (D1 runs a batch as one
-  // transaction).
+  // transaction). The same text from another source (a news edit and a forum reply) counts too. A
+  // copy of an event already judged irrelevant is triaged itself: a forum copy is always relevant.
   const [insert, , stored] = await db.batch([
     db.prepare(
       `INSERT OR IGNORE INTO events (id, doc_key, kind, source, title, url, author, forum_verified, content,
@@ -185,7 +186,8 @@ export async function processFetch(env: Env, key: string, baseline: boolean, att
               CASE WHEN dup.id IS NULL THEN ?13 ELSE 'duplicate' END, dup.id, datetime('now'),
               ?14, ?15, ?16, ?17, ?18, ?19, CASE WHEN dup.id IS NULL THEN ?20 END
        FROM (SELECT COALESCE(?12, (SELECT id FROM events WHERE fingerprint = ?10 AND doc_key != ?2
-                       AND created_at > datetime('now', ?11) LIMIT 1)) AS id) AS dup`
+                       AND created_at > datetime('now', ?11) AND (state = 'pending' OR (state = 'done' AND relevant = 1))
+                       ORDER BY created_at, id LIMIT 1)) AS id) AS dup`
     ).bind(event.id, key, event.kind, doc.source, event.title, doc.url, author, doc.forum_verified,
       // An untriaged copy has no fingerprint, so it can't make a later event look like a crosspost.
       event.content, pointsTo ? null : event.fingerprint, `-${CROSSPOST_WINDOW_DAYS} days`, pointsTo,

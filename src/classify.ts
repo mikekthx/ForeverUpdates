@@ -71,6 +71,18 @@ export async function handleClassifyBatch(batch: MessageBatch<ClassifyMessage>, 
        WHERE id = ? AND state = 'pending'`
     ).bind(d.by, relevant ? 1 : 0, critical ? 1 : 0, d.cls.category, d.cls.summary, d.cls.urgency_rationale,
       critical ? "pending" : null, relevant && !critical ? "queued" : null, row.id));
+    // Forum copies stored as duplicates of this event while it waited are triaged after all (a
+    // Forever-forum post is always relevant): the oldest one, which the sweeper queues on its next
+    // run, and the others (a US/EU pair) become its duplicates, so there's still only one alert.
+    // Copies that merely point to a news article have no fingerprint and are left alone.
+    if (!relevant) {
+      const copies = `duplicate_of = ?1 AND state = 'duplicate' AND forum_verified = 1 AND fingerprint IS NOT NULL`;
+      const oldest = `(SELECT id FROM events WHERE ${copies} ORDER BY created_at, id LIMIT 1)`;
+      stmts.push(
+        db.prepare(`UPDATE events SET duplicate_of = ${oldest} WHERE ${copies} AND id != ${oldest}`).bind(row.id),
+        db.prepare(`UPDATE events SET state = 'pending', duplicate_of = NULL, nudged_at = NULL WHERE ${copies}`).bind(row.id)
+      );
+    }
     // Other servers' channels get the same alert (with their own role), stored with the result.
     if (critical) {
       const payload = buildAlertPayload({ title: row.title, url: row.url, content: row.content, summary: d.cls.summary }, {});

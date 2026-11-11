@@ -239,10 +239,13 @@ const call = async (path, token = "secret-token") => {
  *  only if `retries` is true; otherwise they're returned so a test can inspect or re-deliver them. */
 let msgSeq = 0;
 const parked = [];
-async function settle({ retries = true, maxRounds = 30 } = {}) {
+const heldClassify = []; // classify messages held back by settle({ classify: false })
+async function settle({ retries = true, maxRounds = 30, classify: runClassify = true } = {}) {
   const stats = { work: 0, classify: 0, retried: 0 };
   for (let round = 0; round < maxRounds; round++) {
     const { work, classify } = await (await fakes.fetch("http://fakes/drain")).json();
+    if (!runClassify) heldClassify.push(...classify.splice(0));
+    else classify.push(...heldClassify.splice(0));
     const pending = [
       ...work.map(m => ({ q: "forever-updates-work", body: m.body, attempts: 1 })),
       ...classify.map(m => ({ q: "forever-updates-classify", body: m.body, attempts: 1 })),
@@ -529,6 +532,52 @@ try {
   assert.equal(world.geminiCalls.length, gem2, "recovery calls no model");
   assert.equal(alerts().length, alerts1, "and sends no alert");
   ok("a forum copy of a news article defers to the article: no model call, no alert, not watched");
+
+  // 3h. The same hotfix notes as a news article and as a Forever-forum reply, under different
+  //     titles: one alert. But a copy of an article judged irrelevant is triaged itself, since a
+  //     Forever-forum post is always relevant.
+  const notes = ["Fixed login queues getting stuck on Normal realms after a disconnect.", "Fixed a bug causing unread mail to show the wrong sender for all players.", "Fixed a bug that was causing some mail to arrive in about two minutes."];
+  const plain = ["Fixed an issue where the Hawk pet dealt less melee damage than intended.", "Fixed a bug where pets had more health than intended after resurrecting.", "Fixed an issue where some tooltips showed the wrong mana cost values."];
+  world.newsHtml += newsCard(31, "WoW: Forever Hotfixes - November 10, 2026", "Hotfixes") + newsCard(32, "Hotfixes: November 11, 2026", "Hotfixes");
+  world.articles["31"] = articlePage(["<b>November 10, 2026</b>", ...notes]);
+  world.articles["32"] = articlePage(["<b>November 11, 2026</b>", ...plain]);
+  await poll(); await settle();
+  assert.deepEqual((await events("doc_key IN ('news:31','news:32')")).map(e => [e.doc_key, e.relevant, e.critical]), [["news:31", 1, 1], ["news:32", 0, 0]]);
+  const alerts3h = alerts().length;
+  // An earlier copy, stored as a duplicate of the article before it was judged irrelevant, doesn't
+  // stand in for it either.
+  const [n32] = await events("doc_key = 'news:32'");
+  await db.prepare(`INSERT INTO events (id, doc_key, kind, source, title, url, author, content, fingerprint, state, duplicate_of)
+    VALUES ('ghost@new', 'post:eu:ghost', 'new', 'Blue Post (EU)', 't', 'u', 'Linxy', 'c', ?, 'duplicate', 'news:32@new')`).bind(n32.fingerprint).run();
+  const sameNotes = forumPost({ region: "us", categoryId: 348, title: "WoW: Forever Hotfixes - November 6, 2026", text: ["<b>November 10, 2026</b>", ...notes].join("\n"), topicId: 6600, postNumber: 6 });
+  const samePlain = forumPost({ region: "us", categoryId: 348, title: "WoW: Forever Hotfixes - November 6, 2026", text: ["<b>November 11, 2026</b>", ...plain].join("\n"), topicId: 6600, postNumber: 7 });
+  world.usTracker = [...world.usTracker, sameNotes, samePlain];
+  await poll(); await settle();
+  const [dupNotes] = await events(`doc_key = 'post:us:${sameNotes.id}'`);
+  const [ownPlain] = await events(`doc_key = 'post:us:${samePlain.id}'`);
+  assert.deepEqual([dupNotes.state, dupNotes.duplicate_of], ["duplicate", "news:31@new"], "same notes, other source and title: a duplicate");
+  assert.equal(alerts().length, alerts3h, "no second alert");
+  assert.deepEqual([ownPlain.state, ownPlain.duplicate_of, ownPlain.relevant, ownPlain.digest_state], ["done", null, 1, "queued"], "copy of an irrelevant article is triaged");
+  // The copy arrives while the article still waits for the model: stored as a duplicate, then
+  // triaged itself once the article is judged irrelevant.
+  const racePlain = ["Fixed an issue where some quest items could not be looted by a group.", "Fixed a bug where vendors sold reagents at the wrong price for some players.", "Fixed an issue where flight paths sometimes skipped an intermediate stop."];
+  world.newsHtml += newsCard(33, "Hotfixes: November 12, 2026", "Hotfixes");
+  world.articles["33"] = articlePage(["<b>November 12, 2026</b>", ...racePlain]);
+  await poll(); await settle({ classify: false });
+  const raceCopy = forumPost({ region: "us", categoryId: 348, title: "WoW: Forever Hotfixes - November 6, 2026", text: ["<b>November 12, 2026</b>", ...racePlain].join("\n"), topicId: 6600, postNumber: 8 });
+  const raceCopy2 = forumPost({ region: "us", categoryId: 348, title: "Hotfixes", text: ["<b>November 12, 2026</b>", ...racePlain].join("\n"), topicId: 6601, postNumber: 2, ageMs: 9 * 60_000 });
+  world.usTracker = [...world.usTracker, raceCopy, raceCopy2];
+  await poll(); await settle({ classify: false });
+  assert.deepEqual((await events(`doc_key IN ('post:us:${raceCopy.id}', 'post:us:${raceCopy2.id}')`)).map(e => [e.state, e.duplicate_of]), [["duplicate", "news:33@new"], ["duplicate", "news:33@new"]]);
+  await settle();
+  assert.equal((await events("doc_key = 'news:33'"))[0].relevant, 0);
+  await poll(); await settle();
+  const [lateCopy] = await events(`doc_key = 'post:us:${raceCopy.id}'`);
+  assert.deepEqual([lateCopy.state, lateCopy.duplicate_of, lateCopy.relevant, lateCopy.digest_state], ["done", null, 1, "queued"], "copy of an article judged irrelevant later is triaged");
+  const [lateCopy2] = await events(`doc_key = 'post:us:${raceCopy2.id}'`);
+  assert.deepEqual([lateCopy2.state, lateCopy2.duplicate_of], ["duplicate", lateCopy.id], "a second copy defers to the first: still one item");
+  await db.prepare("UPDATE events SET digest_state = 'sent' WHERE id IN (?, ?)").bind(ownPlain.id, lateCopy.id).run(); // keeps the digest tests' counts
+  ok("the same notes from news and forum alert once; a copy of an irrelevant article is triaged itself");
 
   // 4. Article page fails once → retried (not classified from its teaser), then classified in full.
   world.newsHtml += newsCard(5, "Class Tuning Incoming", "Changes arrive next week");

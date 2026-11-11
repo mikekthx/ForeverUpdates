@@ -47,10 +47,10 @@ export function cutAtSentence(text: string, max: number): { text: string; cut: b
   return { text: cutMarkdown(text, max, true), cut: text.length > max };
 }
 
-/** The post text to show: for an edited post, only the lines that were added. */
+/** The post text to show: for an edited post, the lines that were added (with their headers). */
 function shownText(content: string): string {
   const focus = updateFocus(content ?? "");
-  return (focus ? focus.newText : content ?? "").trim();
+  return (focus ? focus.shown : content ?? "").trim();
 }
 
 /**

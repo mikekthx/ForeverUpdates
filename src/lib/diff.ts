@@ -30,13 +30,37 @@ export function markAddedLines(oldText: string, newText: string): { added: strin
 
 export const UPDATE_MARKER = "[EDITED: lines marked [NEW] were added since the last check]";
 
+/** A markdown heading, or a line (list item too) that is only bold text: "**Classes**", "- **Hunter**". */
+export function isHeaderLine(line: string): boolean {
+  return /^\s*(?:#{1,6}\s+\S.*|(?:[-*]\s+|\d+\.\s+)?\*\*[^*]+\*\*:?\s*)$/.test(line);
+}
+
 /**
  * For an edited post/article: the [NEW] lines, plus the section header each one sits under
  * (nearest earlier unchanged short line, e.g. "WoW: Forever"). Null for ordinary items.
  */
-export function updateFocus(content: string): { newText: string; withHeaders: string } | null {
+export function updateFocus(content: string): { newText: string; withHeaders: string; shown: string } | null {
   if (!content.startsWith(UPDATE_MARKER)) return null;
   const lines = content.split("\n").slice(1);
+  // To display: the [NEW] lines, each section's first one after that section's unchanged header
+  // lines (the last run of them, up to 3). Those are headers the article already had ("Classes",
+  // "Hunter"). Other unchanged text is never shown, so an old fix can't look new.
+  const shown: string[] = [];
+  let headers: string[] = []; // the latest run of unchanged header lines
+  let inRun = false;          // the previous line was one of them
+  let pending = false;        // not shown yet
+  for (const l of lines) {
+    if (!l.trim()) continue;
+    if (l.startsWith("[NEW] ")) {
+      if (pending) shown.push(...headers.slice(-3));
+      shown.push(l.slice(6));
+      pending = inRun = false;
+    } else if (isHeaderLine(l)) {
+      if (!inRun) headers = [];
+      headers.push(l);
+      inRun = pending = true;
+    } else inRun = false;
+  }
   const newLines: string[] = [];
   const out: string[] = [];
   let lastHeader = "";
@@ -52,5 +76,5 @@ export function updateFocus(content: string): { newText: string; withHeaders: st
     out.push(line);
     newLines.push(line);
   }
-  return { newText: newLines.join("\n"), withHeaders: out.join("\n") };
+  return { newText: newLines.join("\n"), withHeaders: out.join("\n"), shown: shown.join("\n") };
 }
