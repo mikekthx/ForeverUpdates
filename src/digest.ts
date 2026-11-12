@@ -8,7 +8,7 @@ import { kvGet, kvSet, placeholders } from "./db";
 import { DiscordError, postDiscord } from "./discord";
 import { broadcastStmts, startFanout } from "./fanout";
 import { DigestRow, buildDigestMessage, groupByThread, threadKey } from "./lib/discord";
-import { UPDATE_MARKER } from "./lib/diff";
+import { UPDATE_MARKER, focusEdit } from "./lib/diff";
 import { clipMarkdown } from "./lib/markdown";
 import { clip } from "./lib/text";
 import { summarizeThreads } from "./llm/chain";
@@ -50,6 +50,18 @@ export async function maybeSendDigest(env: Env, now: Date, opts: { anyTime?: boo
   await closeDayStmt(env.DB, today).run();
   await prune(env.DB);
   return result;
+}
+
+/**
+ * Cron: once the digest is due, queues it for the work queue, which builds and posts it with its own
+ * CPU budget (the cron's goes to polling). Each run queues it again until the day is closed, so a
+ * failed send is retried 5 minutes later; the "digest in progress" row stops two from posting.
+ */
+export async function queueDigestIfDue(env: Env, now: Date): Promise<{ queued: string } | null> {
+  const { date: today, hour } = digestClock(now);
+  if (hour < DIGEST_HOUR || ((await kvGet(env.DB, "digest:last")) ?? "") >= today) return null;
+  await env.WORK.send({ t: "digest", at: now.toISOString() });
+  return { queued: today };
 }
 
 /**
@@ -270,12 +282,13 @@ async function loadRows(db: D1Database, ids: string[]): Promise<DigestRow[]> {
     const chunk = ids.slice(i, i + 90);
     const { results } = await db.prepare(
       `SELECT id, source, title, url, substr(summary, 1, 300) AS summary, created_at,
-              substr(content, 1, CASE WHEN kind = 'edit' THEN ? ELSE ? END) AS content
+              CASE WHEN kind = 'edit' THEN content ELSE substr(content, 1, ?) END AS content
        FROM events WHERE id IN (${placeholders(chunk.length)})`
-    ).bind(perEdit + 1, perItem + 1, ...chunk).all<DigestRow & { created_at: string }>();
-    // One character more than needed shows whether substr cut it: then it's cut again as markdown
-    // (whole lines, the last one as plain text), so no formatting is left open.
-    for (const r of results ?? []) r.content = clipMarkdown(r.content ?? "", r.content?.startsWith(UPDATE_MARKER) ? perEdit : perItem);
+    ).bind(perItem + 1, ...chunk).all<DigestRow & { created_at: string }>();
+    // An edit is loaded whole (stored at most NEWS_CONTENT_MAX), so focusEdit can keep [NEW] lines
+    // from anywhere in it. Otherwise one character more than needed shows whether substr cut it: then
+    // it's cut again as markdown (whole lines, the last one as plain text), so no formatting is left open.
+    for (const r of results ?? []) r.content = r.content?.startsWith(UPDATE_MARKER) ? clipMarkdown(focusEdit(r.content, perEdit), perEdit) : clipMarkdown(r.content ?? "", perItem);
     rows.push(...(results ?? []));
   }
   const order = new Map(ids.map((id, i) => [id, i]));

@@ -30,6 +30,17 @@ export function markAddedLines(oldText: string, newText: string): { added: strin
 
 export const UPDATE_MARKER = "[EDITED: lines marked [NEW] were added since the last check]";
 
+/**
+ * An edit's marked text, trimmed toward `max` before it's clipped from the top: when too long, it
+ * keeps only the [NEW] lines, header lines and the line just before each [NEW] line, so an
+ * addition low in a long article (a known-issues list) isn't cut away. Other items pass through.
+ */
+export function focusEdit(content: string, max: number): string {
+  if (content.length <= max || !content.startsWith(UPDATE_MARKER)) return content;
+  const lines = content.split("\n");
+  return lines.filter((l, i) => i === 0 || l.startsWith("[NEW] ") || isHeaderLine(l) || lines[i + 1]?.startsWith("[NEW] ")).join("\n");
+}
+
 /** A markdown heading, or a line (list item too) that is only bold text: "**Classes**", "- **Hunter**". */
 export function isHeaderLine(line: string): boolean {
   return /^\s*(?:#{1,6}\s+\S.*|(?:[-*]\s+|\d+\.\s+)?\*\*[^*]+\*\*:?\s*)$/.test(line);

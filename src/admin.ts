@@ -52,7 +52,7 @@ async function status(env: Env) {
     db.prepare("SELECT key, value FROM kv WHERE key LIKE ? ORDER BY key").bind(`count:${today}:%`),
     db.prepare(`SELECT key, watch_tier, title, checked_at, watch_until FROM documents WHERE watch_tier > 0 AND watch_until > datetime('now')
                 ORDER BY watch_tier DESC, checked_at ASC LIMIT 50`),
-    db.prepare(`SELECT id, title, kind, state, classified_by, relevant, critical, alert_state, digest_state, created_at
+    db.prepare(`SELECT id, title, kind, state, classified_by, relevant, critical, alert_state, digest_state, summary, rationale, created_at
                 FROM events ORDER BY created_at DESC LIMIT 20`),
     db.prepare(`SELECT (SELECT COUNT(*) FROM webhooks) AS channels,
                        (SELECT COUNT(*) FROM deliveries d JOIN webhooks w ON w.id = d.webhook_id WHERE d.state = 'pending') AS pendingDeliveries,

@@ -5,7 +5,7 @@
  *                  │                                                          │
  *                  ├─ cheap edit probes                                       ├─ critical → Discord alert
  *                  ├─ sweeper (re-queues stuck work)                          └─ relevant → daily digest
- *                  ├─ daily digest (after 5 PM Pacific)
+ *                  ├─ daily digest (after 5 PM Pacific; queued, built and posted by WORK)
  *                  └─ health warnings
  *
  * Alerts and digests also go to other servers' channels added on the public "Add to Discord" page
@@ -14,7 +14,7 @@
 
 import { handleAdmin } from "./admin";
 import { handleClassifyBatch } from "./classify";
-import { maybeSendDigest } from "./digest";
+import { queueDigestIfDue } from "./digest";
 import { warnIfUnhealthy } from "./health";
 import { runPoll } from "./poller";
 import { handlePublic } from "./subscribe";
@@ -35,7 +35,7 @@ export default {
     };
     // Independent steps: a failing source can't block the digest, and vice versa.
     await step("poll", () => runPoll(env));
-    await step("digest", () => maybeSendDigest(env, new Date(controller.scheduledTime)));
+    await step("digest", () => queueDigestIfDue(env, new Date(controller.scheduledTime)));
     await step("health", () => warnIfUnhealthy(env));
     if (failed) throw failed;
   },

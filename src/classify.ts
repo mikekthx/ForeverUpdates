@@ -98,6 +98,13 @@ export async function handleClassifyBatch(batch: MessageBatch<ClassifyMessage>, 
         `UPDATE documents SET watch_tier = 1, watch_until = ?, checked_at = datetime('now') WHERE key = ? AND watch_tier = 0`
       ).bind(sqlTime(Date.now() + WATCH_TIERS[1].days * 86_400_000), row.doc_key));
     }
+    // A critical thread opener whose title didn't look operational ("Addressing Today's Downtime")
+    // is watched like a Blue Post thread, so its "extended by 2 hours" edit isn't missed.
+    if (row.kind === "new" && row.doc_key.startsWith("post:") && critical) {
+      stmts.push(db.prepare(
+        `UPDATE documents SET watch_tier = 2, watch_until = ?, checked_at = datetime('now') WHERE key = ? AND watch_tier = 0 AND post_number = 1`
+      ).bind(sqlTime(Date.now() + WATCH_TIERS[2].days * 86_400_000), row.doc_key));
+    }
   }
   // nudged_at = now on everything still waiting, so the sweeper doesn't queue a second copy while
   // this message's own retry is pending.

@@ -5,7 +5,7 @@
  *   /discord/install   sets a state cookie and sends the person to Discord (OAuth scope webhook.incoming)
  *   /discord/callback  Discord sends them back with a code; it's traded for the webhook Discord
  *                      created in the channel they chose, which is stored in `webhooks`
- *   /discord/manage    that channel's settings (role to ping, remove), behind a secret key in its link
+ *   /discord/manage    that channel's settings (role to ping, test alert, remove), behind a secret key in its link
  *
  * On only when DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET are set; otherwise these paths answer as before.
  */
@@ -14,7 +14,7 @@ import { DIGEST_HOUR, DIGEST_TIME_ZONE, MAX_CHANNELS_PER_SERVER, MAX_SUBSCRIBERS
 import { nextDigestAt } from "./digest";
 import { deleteWebhook, exchangeOAuthCode, postDiscord } from "./discord";
 import { errMessage } from "./http";
-import { parseRoleInput, readOAuthWebhook, roleNoticePayload, webhookUrl, welcomePayload } from "./lib/discord";
+import { parseRoleInput, readOAuthWebhook, roleNoticePayload, testAlertPayload, webhookUrl, welcomePayload, withRole } from "./lib/discord";
 import { landingPage, managePage, messagePage } from "./lib/pages";
 import { sha256Hex } from "./lib/text";
 import type { Env } from "./types";
@@ -104,7 +104,9 @@ const clearState = { "Set-Cookie": `${STATE_COOKIE}=; Path=/; Max-Age=0; HttpOnl
 const startOver = { href: "/", label: "Start again" };
 
 async function install(env: Env, url: URL): Promise<Response> {
-  if (await isFull(env.DB)) return html(landingPage({ full: true, digestTime: digestTimeText() }), 503);
+  // ?reconnect: re-adding a channel that's already subscribed (a lost settings link) works while
+  // full; the callback's limits refuse any other channel.
+  if (!url.searchParams.has("reconnect") && await isFull(env.DB)) return html(landingPage({ full: true, digestTime: digestTimeText() }), 503);
   const state = randomKey(18);
   const authorize = new URL(AUTHORIZE_URL);
   authorize.search = new URLSearchParams({
@@ -178,7 +180,7 @@ async function callback(request: Request, env: Env, url: URL): Promise<Response>
   return redirect(manageLink(hook.id, key, "new"), 303, clearState);
 }
 
-function manageLink(id: string, key: string, notice?: "new" | "saved"): string {
+function manageLink(id: string, key: string, notice?: "new" | "saved" | "tested"): string {
   const q = new URLSearchParams({ id, key });
   if (notice) q.set(notice, "1");
   return `/discord/manage?${q}`;
@@ -213,7 +215,7 @@ async function manageGet(env: Env, url: URL): Promise<Response> {
   const key = url.searchParams.get("key") ?? "";
   const row = await authorizedWebhook(env.DB, url.searchParams.get("id") ?? "", key);
   if (!row) return badLink();
-  const notice = url.searchParams.has("new") ? "new" : url.searchParams.has("saved") ? "saved" : undefined;
+  const notice = url.searchParams.has("new") ? "new" : url.searchParams.has("saved") ? "saved" : url.searchParams.has("tested") ? "tested" : undefined;
   return html(renderManage(row, key, { notice }));
 }
 
@@ -241,6 +243,16 @@ async function managePost(request: Request, env: Env): Promise<Response> {
         : "ForeverUpdates won't post in that channel any more. Its webhook couldn't be deleted just now: you can delete it in the channel's settings (Integrations → Webhooks).",
       { href: "/", label: "Back to the start page" }
     ));
+  }
+
+  if (field("action") === "test") {
+    // shortcut: no cooldown; each click is one post to the clicker's own channel. Add one if it's abused.
+    try { await postDiscord(webhookUrl(row.id, row.token), withRole(testAlertPayload(), row.role_id), 0); }
+    catch (err) {
+      console.warn(`Test alert to webhook ${row.id} failed:`, errMessage(err));
+      return html(renderManage(row, key, { notice: "test-failed" }), 502);
+    }
+    return redirect(manageLink(row.id, key, "tested"));
   }
 
   if (field("action") !== "role") return html(renderManage(row, key), 400);

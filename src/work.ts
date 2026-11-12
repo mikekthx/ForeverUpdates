@@ -14,10 +14,11 @@ import {
   BASELINE_MAX_FETCHES, NUDGE_AFTER_MIN, REGIONS, WATCH_MIN_NEW_CHARS, WORK_MAX_ATTEMPTS
 } from "./config";
 import { bumpCounter } from "./db";
+import { maybeSendDigest } from "./digest";
 import { DiscordError, postDiscord } from "./discord";
 import { processFanout } from "./fanout";
 import { errMessage, getHtml, getJson } from "./http";
-import { UPDATE_MARKER, markAddedLines } from "./lib/diff";
+import { UPDATE_MARKER, focusEdit, markAddedLines } from "./lib/diff";
 import { buildAlertPayload } from "./lib/discord";
 import { fingerprintEdit, fingerprintNew } from "./lib/fingerprint";
 import { isNewsCopyExcerpt, newsPointerArticleId, postText } from "./lib/forum";
@@ -36,6 +37,7 @@ export async function handleWorkBatch(batch: MessageBatch<WorkMessage>, env: Env
       const body = msg.body;
       const out = body.t === "fetch" ? await processFetch(env, body.key, !!body.baseline, msg.attempts)
         : body.t === "deliver" ? await processDeliver(env, body.id, msg.attempts)
+        : body.t === "digest" ? await processDigest(env, body.at)
         : (await processFanout(env, body.id), {});
       if (out.retryAfterSec) msg.retry({ delaySeconds: out.retryAfterSec });
       else msg.ack();
@@ -44,6 +46,17 @@ export async function handleWorkBatch(batch: MessageBatch<WorkMessage>, env: Env
       msg.retry({ delaySeconds: Math.min(60 * 2 ** (msg.attempts - 1), 3600) });
     }
   }
+}
+
+/** Never retried by the queue: the next cron run (5 minutes) queues the digest again if it's still due. */
+async function processDigest(env: Env, at: string): Promise<Outcome> {
+  try {
+    const out = await maybeSendDigest(env, new Date(at));
+    if (out) console.log(JSON.stringify({ event: "digest", ...out }));
+  } catch (err) {
+    console.error("digest failed:", err);
+  }
+  return {};
 }
 
 interface Page {
@@ -156,7 +169,7 @@ export async function processFetch(env: Env, key: string, baseline: boolean, att
       id: `${key}@${shortHash(added.join("\n"))}`,
       kind: "edit",
       title: `${title} (${doc.kind === "post" ? "edited" : "updated"})`,
-      content: clipMarkdown(`${UPDATE_MARKER}\n${marked}`, maxContent),
+      content: clipMarkdown(focusEdit(`${UPDATE_MARKER}\n${marked}`, maxContent), maxContent),
       fingerprint: await fingerprintEdit(title, added)
     };
   }

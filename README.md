@@ -12,13 +12,13 @@ It runs on Cloudflare's free tier (Workers, D1, Queues and Workers AI) and Gemin
 ## How it works
 
 - **Polling.** A cron runs every 5 minutes. It reads the WoW: Forever forum categories (found by their `wow-forever` slug), the Blue Tracker, forum search and the news listing, and records anything new. The first run only records what's already there, so old posts never alert.
-- **Fetching and classifying.** Queue workers fetch each new post or article, then send its text to Gemini (`gemini-3.5-flash-lite`). If Gemini fails, the same request goes to `gemini-3.6-flash`. If both are briefly overloaded (503s), the post waits up to 10 minutes (`GEMINI_WAIT_MIN`) for Gemini to come back. If Gemini is out of quota or stays down, Workers AI (Llama 3.3 70B) takes over. If no model is available, urgent-looking Blue Posts still alert, based on keywords.
+- **Fetching and classifying.** Queue workers fetch each new post or article, then send its text to Gemini (`gemini-3.5-flash-lite`). If Gemini fails, the same request goes to `gemini-3.6-flash` (and if Gemini's answer leaves out an item, just that item does). If both are briefly overloaded (503s), the post waits up to 10 minutes (`GEMINI_WAIT_MIN`) for Gemini to come back. If Gemini is out of quota or stays down, Workers AI (Llama 3.3 70B) takes over. If no model is available, urgent-looking Blue Posts still alert, based on keywords.
 - **Formatting.** Posts keep their own formatting in Discord: bold, italics, lists, headings, links and spoilers. All source text is escaped, so it can't fake a link or ping anyone.
 - **Edit watching.**
-  - Hotfix posts are checked every 15 minutes for 21 days.
-  - Operational Blue Post threads are checked every 15 minutes for 7 days.
+  - Hotfix posts and articles are checked every 15 minutes for 21 days.
+  - Operational Blue Post threads, and any thread whose opening post alerted, are checked every 15 minutes for 7 days.
   - Relevant news articles are checked hourly for 21 days.
-  - An edit alerts only if it adds a line of at least 40 characters.
+  - An edit alerts only if it adds a line of at least 40 characters. In a long article, the model sees the added lines with their section headers, so an addition near the bottom isn't cut off.
 
 ## Setup
 
@@ -114,7 +114,7 @@ Each added channel gets the same alerts and daily digest as yours. Each server c
    An install set up before this feature existed needs the new tables first: see [Updating an existing install](#updating-an-existing-install).
 5. **Try it.** Open your Worker's address, click **Add to Discord** and pick a test channel. You should land on that channel's settings page, the channel should get a welcome message, and `/status` should show `publicPage: true` and one channel under `subscribers`. If you get "Discord didn't confirm the channel" instead, `npx wrangler tail` shows what Discord answered.
 
-Share `https://forever-updates.<your-subdomain>.workers.dev/`. After adding a channel, the person lands on that channel's settings page: a role to ping on urgent alerts, and **Remove**. Its address holds a secret key, so they should bookmark it. Adding the same channel again replaces its webhook and gives a new settings link (the role is kept). While sign-ups are full, that doesn't work: someone who lost the link can delete the webhook in Discord, which removes the channel, and add it again once a slot is free.
+Share `https://forever-updates.<your-subdomain>.workers.dev/`. After adding a channel, the person lands on that channel's settings page: a role to ping on urgent alerts, **Send a test alert**, and **Remove**. Its address holds a secret key, so they should bookmark it. Adding the same channel again replaces its webhook and gives a new settings link (the role is kept). That works even while sign-ups are full: the start page then shows only an "Add it to the same channel again" link, and any other channel is refused.
 
 - A server that deletes the webhook in Discord is dropped on the next post.
 - `/status` shows the channels (never their tokens) under `subscribers`.
@@ -168,7 +168,7 @@ To score the prompt:
 - **CPU time.** Cloudflare's free plan gives 10 ms of CPU per request. In production, a cold run that fetches a large news article has measured up to about 70 ms. Even so, Cloudflare reported no CPU-limit errors.
   - Check this in the dashboard: Metrics, then **Exceeded CPU Time Limits**.
   - If those errors ever appear, Workers Paid lifts the limit.
-- **Health warnings go to your channel only.** Alerts and the digest also go to the channels added on the public page, if it's on.
+- **Health warnings go to your channel only.** Alerts and the digest also go to the channels added on the public page, if it's on. They cover broken sources, stuck queues, a missed digest, alerts that gave up after repeated Discord errors, and posts to other servers stuck for over an hour.
 
 ## License
 

@@ -55,7 +55,9 @@ export interface LandingOpts { full: boolean; digestTime: string }
 
 export function landingPage(o: LandingOpts): string {
   const action = o.full
-    ? `<p class="notice bad">Sign-ups are closed for now: this bot has reached its channel limit.</p>`
+    ? `<p class="notice bad">Sign-ups are closed for now: this bot has reached its channel limit.</p>
+<p>Already added it to a channel and lost that channel's settings link? <a class="button secondary" href="/discord/install?reconnect=1">Add it to the same channel again</a></p>
+<p class="muted">Pick the channel it already posts in to get a new settings link. Any other channel is refused while sign-ups are closed.</p>`
     : `<p><a class="button" href="/discord/install">Add to Discord</a></p>`;
   return renderPage("ForeverUpdates", `
 <div class="card">
@@ -75,7 +77,7 @@ ${action}
 export interface ManageOpts {
   id: string; key: string; guildId: string | null; channelId: string; roleId: string | null;
   lastOkAt: string | null; lastError: string | null;
-  notice?: "new" | "saved" | "bad-role";
+  notice?: "new" | "saved" | "bad-role" | "tested" | "test-failed";
   roleInput?: string;
 }
 
@@ -83,6 +85,8 @@ export function managePage(o: ManageOpts): string {
   const notice = o.notice === "new"
     ? `<p class="notice">This channel is set up. A welcome message was just posted there.</p>`
     : o.notice === "saved" ? `<p class="notice">Saved.${o.roleId ? " A message showing the role was posted in the channel, without pinging it." : ""}</p>`
+    : o.notice === "tested" ? `<p class="notice">A test alert was posted in the channel${o.roleId ? ", pinging the role" : ""}.</p>`
+    : o.notice === "test-failed" ? `<p class="notice bad">Discord refused the test alert. Check that the webhook still exists (channel settings → Integrations → Webhooks).</p>`
     : o.notice === "bad-role" ? `<p class="notice bad">That isn't a role ID. Paste the role's ID (a long number) or its mention, like <code>&lt;@&amp;123456789012345678&gt;</code>.</p>`
     : "";
   const channel = o.guildId
@@ -108,6 +112,14 @@ ${hidden}<input type="hidden" name="action" value="role">
 <input type="text" id="role" name="role" inputmode="numeric" autocomplete="off" placeholder="No role: alerts don't ping anyone" value="${htmlEscape(o.roleInput ?? o.roleId ?? "")}">
 <p class="muted">In Discord: Server Settings → Roles → the role's ⋯ menu → Copy Role ID. If you don't see it, turn on Developer Mode (User Settings → Advanced). Leave the box empty to stop pinging. If the role isn't pinged, turn on "Allow anyone to @mention this role" in its settings. The daily digest never pings.</p>
 <button class="button" type="submit">Save</button>
+</form>
+</div>
+<div class="card">
+<h2>Send a test alert</h2>
+<p class="muted">Posts a sample alert in the channel, pinging the role above if one is set, so you can check that it works.</p>
+<form method="post" action="/discord/manage">
+${hidden}<input type="hidden" name="action" value="test">
+<button class="button secondary" type="submit">Send a test alert</button>
 </form>
 </div>
 <div class="card">

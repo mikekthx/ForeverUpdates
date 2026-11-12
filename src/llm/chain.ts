@@ -13,6 +13,7 @@ import {
 } from "../config";
 import { bumpCounter, kvGetMany, kvSet } from "../db";
 import type { Classification } from "../lib/classify";
+import { focusEdit } from "../lib/diff";
 import { clip } from "../lib/text";
 import type { Env, ThinkingLevel } from "../types";
 import { LlmError } from "./errors";
@@ -106,27 +107,31 @@ export async function classifyItems(env: Env, items: PromptItem[], waitUntil: nu
   };
 
   // 1. Gemini: as many items as fit in one request, to the main model, then (if it fails) the
-  //    same request to the backup model.
+  //    same request to the backup model, or just the items its answer left out.
   if (env.GEMINI_API_KEY) {
     const take: number[] = [];
     let chars = 0;
     items.forEach((it, i) => {
       if (take.length === 0 || chars + it.content.length <= GEMINI_BATCH_CHARS) { take.push(i); chars += it.content.length; }
     });
+    // Items the last answer left out go to the next model (a partial answer isn't a failure).
+    let unanswered = take;
     for (const { provider, model, timeoutMs, thinking } of models) {
+      if (!unanswered.length) break;
       if (paused(geminiPauseKey(model))) {
         geminiBackAt = Math.min(geminiBackAt, Date.parse(kv.get(geminiPauseKey(model))!.value));
         continue;
       }
       try {
-        const got = await classifyWithGemini(take.map(i => items[i]), env.GEMINI_API_KEY, model, timeoutMs, thinking);
-        got.forEach((cls, j) => results.set(take[j], { cls, by: provider }));
+        const asked = unanswered;
+        const got = await classifyWithGemini(asked.map(i => items[i]), env.GEMINI_API_KEY, model, timeoutMs, thinking);
+        got.forEach((cls, j) => results.set(asked[j], { cls, by: provider }));
         await bumpCounter(env.DB, `calls:${provider}`);
         // Gemini is working: items left out only for size wait for its next batch rather than
         // going to the fallback model with a much shorter excerpt.
-        items.forEach((_, i) => { if (!take.includes(i)) overflow.add(i); });
+        if (!geminiAnswered) items.forEach((_, i) => { if (!take.includes(i)) overflow.add(i); });
         geminiAnswered = true;
-        break;
+        unanswered = asked.filter(i => !results.has(i));
       } catch (err) {
         errors.push(err instanceof Error ? err.message : String(err));
         // Failed calls count against the daily quota too (503s included), so count them.
@@ -152,7 +157,7 @@ export async function classifyItems(env: Env, items: PromptItem[], waitUntil: nu
     const model = env.WORKERS_AI_MODEL?.trim() || WORKERS_AI_DEFAULT_MODEL;
     for (const i of left) {
       try {
-        const cls = await classifyWithWorkersAi(env.AI, model, { ...items[i], content: clip(items[i].content, WORKERS_AI_ITEM_CHARS) });
+        const cls = await classifyWithWorkersAi(env.AI, model, { ...items[i], content: clip(focusEdit(items[i].content, WORKERS_AI_ITEM_CHARS), WORKERS_AI_ITEM_CHARS) });
         results.set(i, { cls, by: "workers-ai" });
         await bumpCounter(env.DB, "calls:workers-ai");
       } catch (err) {

@@ -301,6 +301,14 @@ export function welcomePayload(nextDigest: number): Record<string, unknown> {
   };
 }
 
+/** The manage page's test alert: shaped like an alert; the caller adds the role ping (withRole). */
+export function testAlertPayload(): Record<string, unknown> {
+  return {
+    content: "Test alert from ForeverUpdates.",
+    embeds: [{ title: "🔔 Test alert", description: "This is only a test: urgent WoW: Forever alerts will be posted here like this, pinging the role set on the settings page.", color: ALERT_COLOR }]
+  };
+}
+
 /** Shows which role urgent alerts will ping, without pinging it (no mentions allowed). */
 export function roleNoticePayload(roleId: string | null): Record<string, unknown> {
   return {

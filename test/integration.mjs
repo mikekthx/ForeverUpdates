@@ -16,7 +16,7 @@ const world = {
   euSearch: { posts: [{ id: 1, created_at: new Date().toISOString(), username: "Linxy", blurb: "beta", post_number: 1, topic_id: 1 }], topics: [{ id: 1, title: "Beta", slug: "b", category_id: 999 }] },
   newsHtml: "<html><body></body></html>", articles: {}, posts: {},
   articleFail: {}, postFail: {}, fetches: {},
-  geminiMode: "ok", // ok | daily | rate | error | overloaded (every Gemini model)
+  geminiMode: "ok", // ok | daily | rate | error | overloaded | dropLast (every Gemini model)
   geminiModelMode: {}, // model id → mode, overrides geminiMode for that model
   geminiModels: [],    // model id of each Gemini call
   // Eval, 2026-10-28: Flash-Lite needs "high" thinking to match Flash; the Flash backup uses "low".
@@ -110,6 +110,7 @@ async function outbound(request) {
     }
     const items = [...prompt.matchAll(/<item ref="(\d+)"[^>]*forum_verified="(true|false)"[^>]*>\n<title>([^<]*)<\/title>\n<content>\n([\s\S]*?)\n<\/content>/g)];
     const results = items.map(([, ref, verified, title, content]) => ({ ref, ...judge(title, content, verified === "true") }));
+    if (mode === "dropLast") results.pop(); // a valid answer that leaves an item out
     return jsonRes({ candidates: [{ content: { parts: [{ text: JSON.stringify({ results }) }] }, finishReason: "STOP" }] });
   }
   if (host === "discord.com") {
@@ -637,6 +638,25 @@ try {
   await db.prepare("DELETE FROM kv WHERE key LIKE 'pause:%'").run();
   ok("main Gemini model overloaded: the backup Gemini model classifies the full text; the main model is paused briefly");
 
+  // 5b2. The main model answers but leaves an item out: only that item goes to the backup Gemini
+  //      model (not Workers AI with an excerpt).
+  world.geminiModelMode["gemini-3.5-flash-lite"] = "dropLast";
+  const part1 = forumPost({ region: "us", categoryId: 348, title: "Realm restart at noon", text: "Realms restart at noon for maintenance.", topicId: 6012, postNumber: 2 });
+  const part2 = forumPost({ region: "us", categoryId: 348, title: "Thanks for the reports", text: "Appreciate the reports!", topicId: 6013, postNumber: 2 });
+  world.usTracker = [...world.usTracker, part1, part2];
+  models0 = world.geminiModels.length;
+  const ai0p = (await ai()).calls;
+  await poll(); await settle();
+  assert.deepEqual(world.geminiModels.slice(models0), ["gemini-3.5-flash-lite", "gemini-3.6-flash"]);
+  assert.equal(world.geminiCalls.at(-1).match(/<item /g).length, 1, "the backup gets only the item left out");
+  const byPart = (await events(`doc_key IN ('post:us:${part1.id}', 'post:us:${part2.id}')`)).map(e => e.classified_by).sort();
+  assert.deepEqual(byPart, ["gemini", "gemini-backup"]);
+  assert.equal((await ai()).calls, ai0p, "Workers AI not needed");
+  delete world.geminiModelMode["gemini-3.5-flash-lite"];
+  // Out of the digest scenario's way (its message has a size budget).
+  await db.prepare(`UPDATE events SET digest_state = 'sent' WHERE doc_key IN ('post:us:${part1.id}', 'post:us:${part2.id}') AND digest_state = 'queued'`).run();
+  ok("main Gemini model leaves an item out: only that item goes to the backup Gemini model");
+
   // 5c. BOTH Gemini models overloaded (503 spike, 2026-11-10): a new item waits for Gemini (re-queued
   //     for when the pause ends) instead of going to Workers AI; once Gemini is back, Gemini classifies
   //     it. An item older than GEMINI_WAIT_MIN goes to Workers AI as before.
@@ -832,14 +852,16 @@ try {
   await db.batch(bulk);
   const queued = (await events("digest_state = 'queued'")).length;
   let d0 = world.discord.length;
-  await poll(pt("16:00"));
+  await poll(pt("16:00")); await settle();
   assert.equal(world.discord.length, d0, "no digest before 5 PM Pacific");
   world.discordFailNext = 1;
   world.discordFailStatus = 400; // Discord refused it: nothing was posted
-  await poll(pt("17:00"));
+  await poll(pt("17:00")); await settle();
   assert.equal(world.discord.length, d0);
   assert.equal((await events("digest_state = 'queued'")).length, queued);
   await poll(pt("17:05"));
+  assert.equal(world.discord.length, d0, "the cron run only queues the digest (the work queue posts it)");
+  await settle();
   const digestMsgs = world.discord.slice(d0);
   assert.equal(digestMsgs.length, 1, "one digest message a day");
   const dm = digestMsgs[0];
@@ -850,7 +872,7 @@ try {
   assert.ok(dm.embeds[0].description.includes("**[Bulk item 1](https://us.forums.blizzard.com/en/wow/t/1/1)**\n> TL;DR for bulk item 1."));
   assert.equal((await events("digest_state = 'queued'")).length, 0, "every queued item went into the one message");
   d0 = world.discord.length;
-  await poll(pt("17:10"));
+  await poll(pt("17:10")); await settle();
   assert.equal(world.discord.length, d0, "once per day");
   world.discordFailStatus = 500;
   ok("digest: waits for 5 PM Pacific, retries after Discord refuses it, drains the queue, sends once");
@@ -881,14 +903,14 @@ try {
   ]);
   await queueBulk(509, "big");
   d0 = world.discord.length;
-  await poll(pt("17:00"));
+  await poll(pt("17:00")); await settle();
   assert.equal(world.discord.length, d0 + 1, "one message");
   assert.equal(world.discord.at(-1).content, "510 updates today");
   assert.ok(!JSON.stringify(world.discord.at(-1)).includes("Big alert"));
   assert.equal((await events("id = 'big-alert'"))[0].digest_state, null);
   assert.match(world.discord.at(-1).embeds.at(-1).description, /…and \d+ more updates$/);
   assert.equal((await events("digest_state = 'queued'")).length, 0, "everything counted is marked sent");
-  await poll(pt("17:05"));
+  await poll(pt("17:05")); await settle();
   assert.equal(world.discord.length, d0 + 1, "no second message that day");
   ok("digest: more items than it loads → still one message, the rest counted");
 
@@ -897,10 +919,10 @@ try {
   await queueBulk(3, "lost");
   world.discordDropReplyNext = 1;
   d0 = world.discord.length;
-  await poll(pt("17:00"));
+  await poll(pt("17:00")); await settle();
   assert.equal(world.discord.length, d0 + 1);
   assert.equal((await events("digest_state = 'queued'")).length, 0, "an unanswered post counts as sent");
-  await poll(pt("17:05"));
+  await poll(pt("17:05")); await settle();
   assert.equal(world.discord.length, d0 + 1, "not posted again");
   // A 5xx is just as unclear (Discord may have taken it before the error): also counted as sent.
   await nextDigestDay();
@@ -908,10 +930,10 @@ try {
   world.discordFailNext = 1;
   world.discordFailStatus = 503;
   d0 = world.discord.length;
-  await poll(pt("17:00"));
+  await poll(pt("17:00")); await settle();
   world.discordFailStatus = 500;
   assert.equal((await events("digest_state = 'queued'")).length, 0, "a 5xx counts as sent");
-  await poll(pt("17:05"));
+  await poll(pt("17:05")); await settle();
   assert.equal(world.discord.length, d0, "and isn't retried");
   ok("digest: a lost reply or a 5xx from Discord doesn't make it post the digest twice");
 
@@ -921,7 +943,7 @@ try {
   await queueBulk(2, "half");
   await inFlight(digestToday, ["half-0", "half-1"], "posting", 10);
   d0 = world.discord.length;
-  await poll(pt("17:10"));
+  await poll(pt("17:10")); await settle();
   assert.equal(world.discord.length, d0, "the earlier run's digest isn't posted again");
   assert.equal((await events("digest_state = 'queued'")).length, 0);
   assert.equal(await digestDay(), digestToday, "and the day is closed");
@@ -932,12 +954,12 @@ try {
   await queueBulk(2, "busy");
   await inFlight("manual:2026-11-04T22:59:00.000Z", ["busy-0", "busy-1"], "posting", 0);
   d0 = world.discord.length;
-  await poll(pt("17:10"));
+  await poll(pt("17:10")); await settle();
   assert.equal(world.discord.length, d0, "no second post while another run is posting");
   assert.equal((await events("digest_state = 'queued'")).length, 2, "its items are left to that run");
   assert.notEqual(await digestDay(), digestToday, "the day isn't closed for it either");
   await db.prepare(`UPDATE kv SET updated_at = datetime('now', '-10 minutes') WHERE key = 'digest:inflight'`).run();
-  await poll(pt("17:15"));
+  await poll(pt("17:15")); await settle();
   assert.equal((await events("digest_state = 'queued'")).length, 0, "once that run is clearly over, its items are marked sent");
   assert.equal(world.discord.length, d0, "and not posted again by the scheduled run");
   ok("digest: a manual and a scheduled run can't both post the same items");
@@ -949,7 +971,7 @@ try {
   await queueBulk(1, "new");
   await inFlight("manual:2026-11-01T10:00:00.000Z", ["old-0", "old-1"], "posting", 3 * 24 * 60);
   d0 = world.discord.length;
-  await poll(pt("17:00"));
+  await poll(pt("17:00")); await settle();
   assert.equal(world.discord.length, d0 + 1);
   assert.equal(world.discord.at(-1).content, "1 update today", "the older run's items aren't posted again");
   assert.equal((await events("digest_state = 'queued'")).length, 0);
@@ -961,7 +983,7 @@ try {
   await queueBulk(2, "prep");
   await inFlight(digestToday, [], "preparing", 10);
   d0 = world.discord.length;
-  await poll(pt("17:20"));
+  await poll(pt("17:20")); await settle();
   assert.equal(world.discord.length, d0 + 1, "the digest is sent");
   assert.equal(world.discord.at(-1).content, "2 updates today");
   assert.equal((await events("digest_state = 'queued'")).length, 0);
@@ -977,7 +999,7 @@ try {
   assert.equal(world.discord.length, d0 + 1, "the manual send posts the digest");
   assert.equal(await digestDay(), digestToday, "and it counts as today's digest");
   await queueBulk(1, "after");
-  await poll(pt("17:00"));
+  await poll(pt("17:00")); await settle();
   assert.equal(world.discord.length, d0 + 1, "no second digest at 5 PM");
   const manual2 = await call("/run-digest");
   assert.equal(world.discord.length, d0 + 1, "nor from a second manual send");
@@ -990,7 +1012,7 @@ try {
   await db.prepare("INSERT INTO kv (key, value, updated_at) VALUES ('digest:last', '2099-01-01', datetime('now'))").run();
   await queueBulk(1, "later");
   d0 = world.discord.length;
-  await poll(pt("17:10"));
+  await poll(pt("17:10")); await settle();
   await call("/run-digest");
   assert.equal(world.discord.length, d0, "no digest for an earlier day, scheduled or manual");
   assert.equal(await digestDay(), "2099-01-01", "the later day stays recorded");
@@ -1004,7 +1026,7 @@ try {
   await inFlight("2026-11-01", ["older-0"], "posting", 10);
   world.discordFailNext = 1;
   world.discordFailStatus = 400;
-  await poll(pt("17:10"));
+  await poll(pt("17:10")); await settle();
   world.discordFailStatus = 500;
   assert.equal(await digestDay(), "2026-11-03", "completing the 11-01 digest doesn't move the day back");
   ok("digest: the 'sent' day only moves forward");
@@ -1023,17 +1045,19 @@ try {
     threadPost("thr-pending", 180, "pending", "Alert not posted yet: never in the digest before its own post."),
     threadPost("lone-alert", 1, "sent", "Alert with no queued post in its thread.", 9002)
   ]);
+  // Its alert is still on its way: just nudged, so the sweeper doesn't post it during these runs.
+  await db.prepare("UPDATE events SET nudged_at = datetime('now') WHERE id = 'thr-pending'").run();
   d0 = world.discord.length;
   // Discord refuses the first try; the retry shows the same thread TL;DR without asking Gemini again
   // (other servers' channels may already have the first version).
   world.discordFailNext = 1;
   world.discordFailStatus = 400;
-  await poll(pt("17:00"));
+  await poll(pt("17:00")); await settle();
   world.discordFailStatus = 500;
   assert.equal(world.discord.length, d0);
   const gem12j = world.geminiCalls.length;
   assert.equal(world.geminiModels.at(-1), "gemini-3.5-flash-lite", "thread TL;DRs come from the main model only");
-  await poll(pt("17:05"));
+  await poll(pt("17:05")); await settle();
   assert.equal(world.geminiCalls.length, gem12j, "the retry reuses the day's thread TL;DR");
   assert.equal(world.discord.length, d0 + 1);
   const grouped = world.discord.at(-1);
@@ -1049,6 +1073,19 @@ try {
     [["lone-alert", null], ["thr-1", "sent"], ["thr-158", "sent"], ["thr-174", "sent"], ["thr-pending", null]], "alerts shown in a thread aren't shown again");
   ok("digest: a thread's posts are one item; its alerts come along only beside a queued post");
   await nextDigestDay();
+
+  // An edit whose only added line is past the digest's excerpt size still shows that line.
+  {
+    const filler = Array.from({ length: 400 }, (_, i) => `Old known issue number ${i} with some quests.`).join("\n");
+    await db.prepare(`INSERT INTO events (id, doc_key, kind, source, title, url, author, content, state, relevant, critical, category, summary, digest_state)
+      VALUES ('long-edit', 'news:77', 'edit', 'Blizzard News', 'Known Issues (updated)', 'https://news.blizzard.com/en-us/article/77/x', 'Blizzard', ?, 'done', 1, 0, 'Bug Fix', '', 'queued')`)
+      .bind(`[EDITED: lines marked [NEW] were added since the last check]\n## Known Issues\n${filler}\n[NEW] Pets vanish after a loading screen in Barrow Deeps.`).run();
+    d0 = world.discord.length;
+    assert.equal((await call("/run-digest")).status, 200);
+    assert.match(JSON.stringify(world.discord.slice(d0)), /Pets vanish after a loading screen/);
+    await nextDigestDay();
+  }
+  ok("digest: an edit's added line far down a long article still shows");
 
   // /status shows a digest in progress.
   await inFlight("manual:2026-11-04T23:30:00.000Z", [], "posting", 0);
@@ -1087,7 +1124,40 @@ try {
   assert.equal((await call("/status")).body.stuck.digest, 1);
   await db.prepare("DELETE FROM events WHERE id = 'stuck-digest'").run();
   await (await fakes.fetch("http://fakes/drain")).json();
-  ok("health: broken source, stuck queue and stuck digest each produce one warning");
+  // An alert that gave up, and a post to another server's channel stuck pending.
+  await db.batch([
+    // nudged_at: when its last attempt failed. Failed 2 days ago and never reported (no mark yet): reported.
+    db.prepare(`INSERT INTO events (id, doc_key, kind, source, title, url, author, content, state, alert_state, nudged_at, created_at)
+      VALUES ('gave-up', 'news:x', 'new', 'Blizzard News', 't', 'u', 'a', 'c', 'done', 'failed', datetime('now', '-2 days'), datetime('now', '-2 days'))`),
+    // Failing in a second that isn't over yet: left for the next run, not lost behind the mark.
+    db.prepare(`INSERT INTO events (id, doc_key, kind, source, title, url, author, content, state, alert_state, nudged_at)
+      VALUES ('gave-up-now', 'news:y', 'new', 'Blizzard News', 't', 'u', 'a', 'c', 'done', 'failed', datetime('now', '+1 minute'))`),
+    db.prepare("INSERT INTO webhooks (id, token, channel_id, manage_hash) VALUES ('390000000000000001', 'x', '490000000000000001', 'h')"),
+    db.prepare("INSERT INTO broadcasts (id, kind, payload) VALUES ('stuck-b', 'alert', '{}')"),
+    db.prepare("INSERT INTO deliveries (broadcast_id, webhook_id, state, created_at) VALUES ('stuck-b', '390000000000000001', 'pending', datetime('now', '-2 hours'))"),
+    db.prepare("DELETE FROM kv WHERE key = 'warn:backlog'")
+  ]);
+  const healthRun = async () => {
+    await db.prepare("DELETE FROM kv WHERE key = 'warn:backlog'").run();
+    d0 = world.discord.length;
+    await poll();
+    const w = world.discord.slice(d0).filter(m => /health warning/.test(m.embeds?.[0]?.title ?? ""));
+    assert.equal(w.length, 1);
+    return w[0].embeds[0].description;
+  };
+  let desc = await healthRun();
+  assert.match(desc, /1 alert\(s\) gave up/);
+  assert.match(desc, /1 post\(s\) to other servers' channels pending/);
+  await db.prepare("UPDATE events SET nudged_at = datetime('now', '-1 second') WHERE id = 'gave-up-now'").run();
+  assert.match(await healthRun(), /1 alert\(s\) gave up/, "the later failure is reported on the next run");
+  // Each reported once, cooldown or not.
+  assert.doesNotMatch(await healthRun(), /gave up/, "a failed alert is reported once");
+  await db.batch([
+    db.prepare("DELETE FROM events WHERE id IN ('gave-up', 'gave-up-now')"), db.prepare("DELETE FROM deliveries WHERE broadcast_id = 'stuck-b'"),
+    db.prepare("DELETE FROM broadcasts WHERE id = 'stuck-b'"), db.prepare("DELETE FROM webhooks")
+  ]);
+  await (await fakes.fetch("http://fakes/drain")).json();
+  ok("health: broken source, stuck queue, stuck digest, a failed alert and stuck fan-out each produce a warning");
 
   // 14. /status and /debug
   const st = (await call("/status")).body;
@@ -1189,6 +1259,17 @@ try {
     assert.equal(notice.length, 1);
     assert.match(notice[0].content, new RegExp(`<@&${ROLE}>`));
     assert.deepEqual(notice[0].allowed_mentions, { parse: [] }, "showing the role doesn't ping it");
+    // A test alert pings the channel's role (and only it).
+    d0 = world.discord.length;
+    r = await page("/discord/manage", form({ id: A1, key: keyA1, action: "test" }));
+    assert.equal(r.status, 303);
+    assert.match(r.headers.get("location"), /&tested=1$/);
+    const test = sentTo(A1, d0);
+    assert.equal(test.length, 1);
+    assert.match(test[0].content, new RegExp(`^<@&${ROLE}> Test alert`));
+    assert.deepEqual(test[0].allowed_mentions, { parse: [], roles: [ROLE] });
+    assert.match((await page(r.headers.get("location"))).text, /A test alert was posted in the channel, pinging the role/);
+    assert.equal((await page("/discord/manage", form({ id: A1, key: "wrong", action: "test" }))).status, 404, "the key is needed");
     assert.equal((await connect({ webhookId: B, channelId: B_CH, guildId: "723456789012345678" })).status, 303);
 
     // The same channel added again: its earlier webhook is deleted and replaced, keeping the role.
@@ -1405,6 +1486,14 @@ try {
       INSERT INTO webhooks (id, token, channel_id, manage_hash) SELECT printf('9%017d', i), 'x', printf('8%017d', i), 'h' FROM n`).run();
     assert.match((await page("/")).text, /Sign-ups are closed/);
     assert.equal((await page("/discord/install")).status, 503);
+    // A lost settings link while full: re-adding the channel it already posts in still works.
+    assert.match((await page("/")).text, /href="\/discord\/install\?reconnect=1"/);
+    const re = await page("/discord/install?reconnect=1");
+    assert.equal(re.status, 302);
+    r = await connect({ webhookId: "340000000000000005", channelId: "800000000000000001",
+      install: { state: new URL(re.headers.get("location")).searchParams.get("state"), cookie: re.headers.get("set-cookie").split(";")[0] } });
+    assert.equal(r.status, 303, "the subscribed channel gets a new settings link");
+    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM webhooks").first()).n, 100, "replaced, not added");
     r = await connect({ webhookId: "340000000000000004", channelId: "440000000000000004", install: early });
     assert.equal(r.status, 503);
     assert.ok(world.deletedWebhooks.includes("340000000000000004"));
@@ -1430,6 +1519,18 @@ try {
     await db.prepare("DELETE FROM deliveries").run();
     await db.prepare("DELETE FROM broadcasts WHERE id IN ('orphan', 'recent')").run();
     ok("fan-out: a channel removed by hand is ignored; broadcasts older than 7 days are cleaned up");
+  }
+
+  // A critical thread opener whose title doesn't look operational is watched for edits anyway.
+  {
+    const downtime = forumPost({ region: "us", categoryId: 348, title: "Addressing tonight's downtime", text: "Realms are offline for emergency work.", topicId: 9200 });
+    world.usTracker = [...world.usTracker, downtime];
+    await poll(); await settle();
+    const d = await doc(`post:us:${downtime.id}`);
+    assert.equal((await events(`doc_key = 'post:us:${downtime.id}'`))[0].critical, 1);
+    assert.equal(d.watch_tier, 2, "critical opener promoted to the Blue Post thread tier");
+    assert.ok(d.watch_until > new Date().toISOString().slice(0, 10));
+    ok("a critical thread opener with an unusual title is watched for edits");
   }
 
   console.log(`\n${passed} integration scenarios passed`);

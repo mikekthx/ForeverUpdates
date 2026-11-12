@@ -32,7 +32,8 @@ export const seededKey = (regions: Region[]) => `seeded:${regions.join(",")}`;
 /** Watch tier for a newly seen document (relevant articles are promoted later by the classifier). */
 export function initialWatchTier(hit: Hit): number {
   if (hit.kind === "news") return HOTFIX_TITLE.test(hit.title) ? 3 : 0;
-  return hit.postNumber === 1 && OPERATIONAL_TITLE.test(hit.title) ? 2 : 0;
+  if (hit.postNumber !== 1) return 0;
+  return HOTFIX_TITLE.test(hit.title) ? 3 : OPERATIONAL_TITLE.test(hit.title) ? 2 : 0;
 }
 
 export async function runPoll(env: Env, opts: { seedOnly?: boolean } = {}): Promise<PollStats> {

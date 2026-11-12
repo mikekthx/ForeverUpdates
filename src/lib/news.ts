@@ -92,7 +92,9 @@ export function parseNewsListing(html: string, origin = "https://news.blizzard.c
 export function titleFromSlug(url: string): string {
   const m = url.match(/\/article\/\d+\/([^/?#]+)/i);
   if (!m) return "";
-  const words = decodeURIComponent(m[1]).replace(/[-_]+/g, " ").trim();
+  let slug = m[1];
+  try { slug = decodeURIComponent(slug); } catch { /* a stray "%" would otherwise fail the whole listing */ }
+  const words = slug.replace(/[-_]+/g, " ").trim();
   return words ? words.charAt(0).toUpperCase() + words.slice(1) : "";
 }
 

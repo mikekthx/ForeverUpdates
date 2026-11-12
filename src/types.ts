@@ -35,7 +35,8 @@ export interface Env {
 export type WorkMessage =
   | { t: "fetch"; key: string; baseline?: boolean }
   | { t: "deliver"; id: string }
-  | { t: "fanout"; id: string };     // a broadcast to other servers' webhooks
+  | { t: "fanout"; id: string }      // a broadcast to other servers' webhooks
+  | { t: "digest"; at: string };     // the daily digest, due as of this cron time (ISO)
 
 export interface ClassifyMessage { id: string }
 

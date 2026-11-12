@@ -3,7 +3,7 @@ import { clip, decodeEntities, firstYoutubeLink, htmlToText, normalizeText, toke
 import { clipMarkdown, escapeMarkdown, htmlToMarkdown, plainLine, stripMarkdown } from "../src/lib/markdown.ts";
 import { balanced as lineBalanced } from "./balanced.mts";
 import { parseNewsListing, extractArticleTitle, titleFromSlug, extractArticleFullText, articleProbe } from "../src/lib/news.ts";
-import { markAddedLines, updateFocus, UPDATE_MARKER } from "../src/lib/diff.ts";
+import { focusEdit, markAddedLines, updateFocus, UPDATE_MARKER } from "../src/lib/diff.ts";
 import { pickForeverCategories, flattenCategoryList, parseTracker, parseSearch, newsPointerArticleId, postText, isNewsCopyExcerpt } from "../src/lib/forum.ts";
 import { heuristicClassify, sanitizeClassification } from "../src/lib/classify.ts";
 import { parseRoleInput, readOAuthWebhook, roleNoticePayload, welcomePayload, withRole, webhookUrl } from "../src/lib/discord.ts";
@@ -81,6 +81,7 @@ assert.equal(oc.length, 1);
 assert.equal(oc[0].title, "Wow forever class tuning incoming");
 assert.equal(oc[0].titleFromSlug, true);
 assert.equal(titleFromSlug("https://x/en-us/article/1/"), "");
+assert.equal(titleFromSlug("https://x/en-us/article/1/save-50%-now"), "Save 50% now", "a stray % doesn't throw");
 ok("parseNewsListing falls back to the URL slug for empty overlay links");
 
 // JSON-LD beats markup; title sources
@@ -101,6 +102,18 @@ assert.deepEqual(markAddedLines(v2, v2).added, []);
 assert.equal(markAddedLines(v1, v2).marked.split("\n").slice(0, 4).join("|"),
   "Hotfixes|[NEW] November 6, 2026|WoW: Forever|[NEW] Skyborne glide no longer drains stamina while mounted.");
 ok("markAddedLines returns only newly added lines");
+
+// focusEdit: a long edit keeps its [NEW] lines (even at the bottom), headers and the line before each.
+{
+  const filler = Array.from({ length: 300 }, (_, i) => `Old fix number ${i} for an issue with quests.`);
+  const long = [UPDATE_MARKER, "## Known Issues", ...filler, "**Hunter**", "Pets are fine.", "[NEW] Pets vanish after a loading screen."].join("\n");
+  const f = focusEdit(long, 2000);
+  assert.equal(f, [UPDATE_MARKER, "## Known Issues", "**Hunter**", "Pets are fine.", "[NEW] Pets vanish after a loading screen."].join("\n"));
+  assert.ok(clipMarkdown(long, 2000).indexOf("Pets vanish") < 0, "plain clipping would lose it");
+  assert.equal(focusEdit("short", 2000), "short");
+  assert.equal(focusEdit(filler.join("\n"), 100), filler.join("\n"), "a new item (no marker) passes through");
+  ok("focusEdit keeps a long edit's added lines within the clip");
+}
 
 // Extraction: largest top-level <article> wins (related-article cards ignored), nested articles
 // don't cut it short, and a short JSON-LD summary doesn't beat the real body.
@@ -746,6 +759,8 @@ assert.equal(initialWatchTier(hit({ title: "WoW: Forever Launch Known Issues" })
 assert.equal(initialWatchTier(hit({ title: "WoW: Forever Launch Known Issues", postNumber: 14 })), 0, "replies aren't watched");
 assert.equal(initialWatchTier(hit({ title: "Thanks for the Skyborne feedback" })), 0);
 assert.equal(initialWatchTier(hit({ kind: "news", title: "Watch the Unbowed short story" })), 0);
+assert.equal(initialWatchTier(hit({ title: "WoW: Forever Hotfixes" })), 3, "forum hotfix openers get the hotfix tier");
+assert.equal(initialWatchTier(hit({ title: "WoW: Forever Hotfixes", postNumber: 3 })), 0);
 ok("initialWatchTier: hotfix posts 3, operational thread openers 2, others 0");
 
 // Prompt rendering can't be broken out of by item text
@@ -966,7 +981,9 @@ ok("geminiModels: the configured order, each model with its own settings");
   assert.equal(htmlEscape(`<a href="x">'&'</a>`), "&lt;a href=&quot;x&quot;&gt;&#39;&amp;&#39;&lt;/a&gt;");
   const land = landingPage({ full: false, digestTime: "5 PM Pacific" });
   assert.match(land, /href="\/discord\/install"/);
-  assert.doesNotMatch(landingPage({ full: true, digestTime: "5 PM Pacific" }), /\/discord\/install/, "no button when full");
+  const full = landingPage({ full: true, digestTime: "5 PM Pacific" });
+  assert.doesNotMatch(full, /href="\/discord\/install"/, "no sign-up button when full");
+  assert.match(full, /href="\/discord\/install\?reconnect=1"/, "only the re-add link for a lost settings link");
   const page = managePage({
     id: "323456789012345678", key: `k"><script>`, guildId: "523456789012345678", channelId: "423456789012345678", roleId: null,
     lastOkAt: null, lastError: `<img src=x onerror=alert(1)>`, notice: "bad-role", roleInput: `"><script>alert(1)</script>`
