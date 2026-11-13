@@ -9,3 +9,6 @@ fixtures/
 
 # Local only: notes for Claude Code.
 CLAUDE.md
+
+# Local only: personal Claude Code settings.
+.claude/settings.local.json
