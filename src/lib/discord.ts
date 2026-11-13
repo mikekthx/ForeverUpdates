@@ -1,7 +1,7 @@
 /** Discord payload builders (pure; sending lives in src/discord.ts). */
 
 import { UPDATE_MARKER, updateFocus } from "./diff";
-import { cutMarkdown, escapeMarkdown, inlineMarkdown, linkUrl } from "./markdown";
+import { cutMarkdown, escapeMarkdown, inlineMarkdown, linkUrl, stripMarkdown } from "./markdown";
 import { clip, splitVideoLine } from "./text";
 
 export interface DigestRow {
@@ -162,7 +162,7 @@ function shareBudget(needs: number[], budget: number): number[] {
  * linked titles don't all fit, the rest are counted in a closing "…and N more updates" line, along
  * with `extra` items the caller didn't load. Posts of one forum thread (or versions of one article)
  * are one item: the title once, then `threadTldr`'s one TL;DR for the thread (by threadKey) and a link
- * to each post, or without it a line per post.
+ * to each post, or without it a line per post. Two posts with the same video are one item, linking both.
  */
 export function buildDigestMessage(rows: DigestRow[], opts: { extra?: number; threadTldr?: Map<string, string> } = {}): { payload: Record<string, unknown>; shown: number } {
   const extra = Math.max(0, opts.extra ?? 0);
@@ -170,16 +170,18 @@ export function buildDigestMessage(rows: DigestRow[], opts: { extra?: number; th
   const oneLine = (s: string) => s.replace(/\s+/g, " ").trim();
   // Each line without its heading, list or quote prefix, to run together into one paragraph.
   const bodyOf = (text: string) => text.split("\n").map(l => inlineMarkdown(l.trim())).filter(Boolean).join("\n");
-  const items = [...groupByThread(rows)].map(([key, posts]) => {
+  // A post's own lines, headings and lists kept (blank lines dropped), for its excerpt.
+  const linesOf = (text: string) => text.split("\n").map(l => l.trimEnd()).filter(l => l.trim()).join("\n");
+  const found = [...groupByThread(rows)].map(([key, posts]) => {
     const r = posts[0];
     const news = r.source === "Blizzard News";
     if (posts.length === 1) {
       const { video, text } = splitVideo(r.content);
       return {
-        news, n: 1,
+        news, n: 1, video, link: linkUrl(shortLink(r.url)), also: [] as string[],
         head: `**[${linkText(r.title)}](${linkUrl(shortLink(r.url))})**${video ? ` · [▶ Video](${video})` : ""}`,
         tldr: r.summary?.trim() ? `> ${escapeMarkdown(clip(oneLine(r.summary), 300))}` : "", // a one-line quote box
-        body: bodyOf(text)
+        body: linesOf(text)
       };
     }
     // A thread: its title once, then its one TL;DR for all the posts and a link to each; without that
@@ -196,12 +198,28 @@ export function buildDigestMessage(rows: DigestRow[], opts: { extra?: number; th
     };
     const summary = opts.threadTldr?.get(key)?.trim();
     return {
-      news, n: posts.length,
+      news, n: posts.length, video: undefined as string | undefined, link: "", also: [] as string[],
       head: `**[${linkText(r.title.replace(/ \((?:edited|updated)\)$/, ""))}](${linkUrl(shortLink(r.url))})** · ${posts.length} ${news ? "versions" : "posts"}`,
       tldr: summary ? `> ${escapeMarkdown(clip(oneLine(summary), 300))}\n${posts.map(link).join(" · ")}` : posts.map(line).join("\n"),
       body: ""
     };
   });
+  // One video in two posts (a news article and its forum announcement): one entry, the one with
+  // more to show, with a link to each other one.
+  const byVideo = new Map<string, number>();
+  const merged = new Set<number>();
+  found.forEach((it, i) => {
+    if (!it.video) return;
+    const j = byVideo.get(it.video);
+    if (j === undefined) { byVideo.set(it.video, i); return; }
+    const size = (x: typeof it) => x.tldr.length + x.body.length;
+    const [keep, drop] = size(found[j]) >= size(it) ? [j, i] : [i, j];
+    found[keep].also.push(`[${found[drop].news ? "Article" : "Forum post"}](${found[drop].link})`, ...found[drop].also);
+    found[keep].n += found[drop].n;
+    merged.add(drop);
+    byVideo.set(it.video, keep);
+  });
+  const items = found.filter((_, i) => !merged.has(i)).map(it => (it.also.length ? { ...it, head: `${it.head} · ${it.also.join(" · ")}` } : it));
   const groups = [false, true]; // Blue Posts, then news
   const SEP = 2;                // "\n\n" between items (counted for each item: a little conservative)
   const closing = (more: number) => `\n\n…and ${more} more update${more === 1 ? "" : "s"}`;
@@ -230,7 +248,9 @@ export function buildDigestMessage(rows: DigestRow[], opts: { extra?: number; th
     const total = fixed.reduce((a, b) => a + b, 0);
     if (total > budget || groups.some(g => fixedOf(g) > cap)) continue;
 
-    const needs = items.map(it => (withTldr && it.body ? it.body.length + 1 : 0)); // +1 for "\n"
+    // +1 for "\n"; headings become bold lines, up to 2 characters more each.
+    const boldRoom = (body: string) => 2 * (body.match(/^(?:> )?#{1,3} /gm)?.length ?? 0);
+    const needs = items.map(it => (withTldr && it.body ? it.body.length + 1 + boldRoom(it.body) : 0));
     const share = shareBudget(needs, budget - total);
     // Each embed's description also has its own limit: cap a group that went over, and give what
     // it frees to the other group.
@@ -250,9 +270,17 @@ export function buildDigestMessage(rows: DigestRow[], opts: { extra?: number; th
     const texts = items.map((it, i) => {
       const parts = [it.head];
       if (withTldr && it.tldr) parts.push(it.tldr);
-      const room = share[i] - 1;
-      // Cut while still one line per paragraph (so whole ones keep their formatting), then run together.
-      if (withTldr && it.body && (it.body.length <= room || room >= MIN_EXCERPT_CHARS)) parts.push(cutAtSentence(it.body, room).text.replace(/\n/g, " "));
+      // Headings become bold lines, no bigger than the item's title: their text as plain (escaped)
+      // text, so nothing inside (bold, code, a link) can meet the added markers. One that would come
+      // out longer than its room stays a heading.
+      // Only headings within the first share[i] characters can be kept by the cut.
+      const room = share[i] - 1 - boldRoom(it.body.slice(0, share[i]));
+      if (withTldr && it.body && (it.body.length <= room || room >= MIN_EXCERPT_CHARS)) {
+        parts.push(cutAtSentence(it.body, room).text.replace(/^((?:> )?)#{1,3} (.+)$/gm, (line, quote: string, text: string) => {
+          const bold = `${quote}**${escapeMarkdown(stripMarkdown(text)).trim()}**`;
+          return bold.length > quote.length + 4 && bold.length <= line.length + 2 ? bold : line;
+        }));
+      }
       return parts.join("\n");
     });
     return { payload: digestPayload(count, render(texts, extra)), shown: rows.length };

@@ -614,11 +614,55 @@ assert.ok(floodText.endsWith(`…and ${200 - dFlood.shown} more updates`), flood
 // Post text (escaped when it was extracted) keeps its own formatting; titles can't break the link syntax.
 const dEsc = buildDigestMessage([blue(1, postText(`<p>**Not bold** [fake](https://evil.example)</p><ul><li><strong>Bold</strong> and <a href="https://e.com/x">a link</a></li></ul>`), "")].map(r => ({ ...r, title: "Patch [1.2] notes" })));
 assert.equal((dEsc.payload as any).embeds[0].description,
-  "**[Patch 1.2 notes](https://us.forums.blizzard.com/en/wow/t/1/1)**\n\\*\\*Not bold\\*\\* \\[fake\\](<https://evil.example>) **Bold** and [a link](https://e.com/x)", "list prefix dropped in the one-paragraph excerpt");
+  "**[Patch 1.2 notes](https://us.forums.blizzard.com/en/wow/t/1/1)**\n\\*\\*Not bold\\*\\* \\[fake\\](<https://evil.example>)\n- **Bold** and [a link](https://e.com/x)", "the excerpt keeps its lines and list");
 // The digest query cuts long content (substr, one character more than it keeps): loadRows cuts it
 // again with clipMarkdown, so the line it fell in is plain text.
 const queryCut = "**Whole** line.\nShort **bold that the query cu";
-assert.equal((buildDigestMessage([blue(1, clipMarkdown(queryCut, queryCut.length - 1), "")]).payload as any).embeds[0].description.split("\n")[1], "**Whole** line. Short bold that the query …");
+assert.deepEqual((buildDigestMessage([blue(1, clipMarkdown(queryCut, queryCut.length - 1), "")]).payload as any).embeds[0].description.split("\n").slice(1), ["**Whole** line.", "Short bold that the query …"]);
+// The excerpt keeps its structure (11/11's article ran together): headings as bold lines, lists as lists.
+const dLines = buildDigestMessage([news(1, "Intro line.\n## Choose Your Edition\n### Heroic Pack\n- A mount\n  - Needs riding\n- A toy\nOutro.")]);
+assert.equal((dLines.payload as any).embeds[0].description,
+  "**[News 1](https://news.blizzard.com/en-us/article/1)**\n> News TL;DR 1.\nIntro line.\n**Choose Your Edition**\n**Heroic Pack**\n- A mount\n  - Needs riding\n- A toy\nOutro.");
+// A long one is cut at a whole line, and stays within its share once headings are bold.
+const sections = Array.from({ length: 120 }, (_, i) => `## Section ${i}\n- Item ${i} of a long list of upgrades.`).join("\n");
+const dSections = buildDigestMessage([news(1, sections)]);
+fits(dSections.payload);
+assert.match((dSections.payload as any).embeds[0].description, /\n- Item \d+ of a long list of upgrades\. …$/);
+// Only the headings the cut can keep take room: 100 later headings don't push out a short share's excerpt.
+const manyHeads = `Opening sentence that is worth showing.\n${Array.from({ length: 100 }, (_, i) => `## H${i}\n- Point ${i}.`).join("\n")}`;
+const dHeads = buildDigestMessage([...Array.from({ length: 30 }, (_, i) => blue(400 + i, essay)), news(1, manyHeads)]);
+fits(dHeads.payload);
+assert.ok((dHeads.payload as any).embeds.at(-1).description.includes("Opening sentence that is worth showing."));
+// One video in a news article and a forum post (11/12's podcast): one entry, the fuller one, linking the other.
+const pod = "https://youtu.be/a_fLWei5KwE";
+const dPod = buildDigestMessage([{ ...blue(7, `${pod}\nEpisode 7.`, ""), title: "Podcast 7" }, { ...news(7, `${pod}\nJoin the hosts for a lore episode.\nPress play.`), summary: "" }]);
+fits(dPod.payload);
+assert.equal((dPod.payload as any).content, "2 updates today");
+assert.deepEqual((dPod.payload as any).embeds.map((e: any) => e.description),
+  [`**[News 7](https://news.blizzard.com/en-us/article/7)** · [▶ Video](${pod}) · [Forum post](https://us.forums.blizzard.com/en/wow/t/7/1)\nJoin the hosts for a lore episode.\nPress play.`]);
+assert.equal(dPod.shown, 2);
+// Three posts with one video, each fuller than the last: one entry that still links both others.
+const pod3 = buildDigestMessage([{ ...blue(10, `${pod}\nA.`, ""), title: "Pod A" }, { ...blue(11, `${pod}\nBe longer.`, ""), title: "Pod B" }, { ...news(12, `${pod}\nThe longest of the three.`), summary: "" }]);
+assert.deepEqual((pod3.payload as any).embeds.map((e: any) => e.description),
+  [`**[News 12](https://news.blizzard.com/en-us/article/12)** · [▶ Video](${pod}) · [Forum post](https://us.forums.blizzard.com/en/wow/t/11/1) · [Forum post](https://us.forums.blizzard.com/en/wow/t/10/1)\nThe longest of the three.`]);
+assert.equal(pod3.shown, 3);
+// Titles only (stage 4): a merged entry counts both posts, so "…and N more" stays right.
+const podFlood = buildDigestMessage([{ ...blue(300, `${pod}\nX.`), title: "Pod C" }, { ...news(300, `${pod}\nY.`) }, ...flood], { extra: 7 });
+fits(podFlood.payload);
+assert.ok((podFlood.payload as any).embeds.at(-1).description.endsWith(`…and ${202 + 7 - podFlood.shown} more updates`));
+assert.ok((podFlood.payload as any).embeds.some((e: any) => e.description.includes(`[▶ Video](${pod}) · [`)), "the merged entry is listed with both links");
+const podEntries = (podFlood.payload as any).embeds.map((e: any) => e.description.match(/^\*\*\[/gm)?.length ?? 0).reduce((a: number, b: number) => a + b, 0);
+assert.equal(podFlood.shown, podEntries + 1, "the merged entry counts as its two posts");
+// A heading's own formatting can't meet the added bold: it's plain (escaped) text, links kept as their words.
+const headed = (h: string) => (buildDigestMessage([news(1, `${h}\nBody.`)]).payload as any).embeds[0].description.split("\n")[2];
+assert.equal(headed("## **Fixes**"), "**Fixes**");
+assert.equal(headed("## See [the notes](https://e.com/x) now"), "**See the notes now**");
+// Code inside a heading: its text, escaped, in the bold line.
+assert.equal(headed("## Fix `a*b` now"), "**Fix a\\*b now**");
+// Code holding "**" and a fake link escapes past its room: left as the heading it was (already safe).
+assert.equal(headed("## `x** [fake](https://evil.example)`"), "## `x** [fake](https://evil.example)`");
+// Different videos stay apart.
+assert.equal((buildDigestMessage([blue(8, "https://youtu.be/aaaaaaaaaaa\nA."), news(8, "https://youtu.be/bbbbbbbbbbb\nB.")]).payload as any).embeds.length, 2);
 // The alert keeps headings, and a list or quote together.
 assert.equal((buildAlertPayload({ title: "t", url: "https://e/x", content: postText(`<h2>Fixes</h2><ul><li>One</li><li>Two</li></ul><blockquote><p>A</p><p>B</p></blockquote><p>End.</p>`), summary: "" }, {}) as any).embeds[0].description,
   "## Fixes\n\n- One\n- Two\n\n> A\n> B\n\nEnd.");
