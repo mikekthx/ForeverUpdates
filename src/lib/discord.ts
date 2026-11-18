@@ -13,10 +13,15 @@ export interface DigestRow {
   content: string; // the text that was classified (for an edit, marked with [NEW] lines)
 }
 
-/** Posts of one forum topic share a key (host + topic id); anything else is keyed by its own URL. */
+/**
+ * Posts of one forum topic share a key (host + topic id); anything else is keyed by its short link, so
+ * versions of a renamed article (same id, new slug) are one item, not two embeds with one URL (Discord
+ * shows only the first of those).
+ */
 export function threadKey(url: string): string {
-  const m = url.match(/^(https:\/\/[a-z]{2}\.forums\.blizzard\.com)\/[a-z]{2}\/wow\/t\/[^/]+\/(\d+)\/\d+$/i);
-  return m ? `${m[1].toLowerCase()}/t/${m[2]}` : url;
+  // The slug is optional: Discourse links a post with or without it.
+  const m = url.match(/^(https:\/\/[a-z]{2}\.forums\.blizzard\.com)\/[a-z]{2}\/wow\/t\/(?:[^/]+\/)?(\d+)\/\d+$/i);
+  return m ? `${m[1].toLowerCase()}/t/${m[2]}` : shortLink(url);
 }
 
 /** Rows by thread, each thread where its first row was. */
@@ -34,6 +39,7 @@ export function groupByThread<T extends { url: string }>(rows: T[]): Map<string,
 export const DISCORD_EMBED_TOTAL_LIMIT = 6000;
 const EMBED_DESCRIPTION_LIMIT = 4096;
 const DIGEST_BUDGET = 5800;      // headroom under the 6000 limit
+const EMBEDS_PER_MESSAGE = 10;   // Discord's limit
 const ALERT_POST_CHARS = 1500;   // post text in an alert, before "Read the full post"
 const MIN_EXCERPT_CHARS = 60;    // a shorter cut of a longer post says too little to show
 
@@ -41,6 +47,12 @@ const MIN_EXCERPT_CHARS = 60;    // a shorter cut of a longer post says too litt
 export const ALERT_COLOR = 0xdc2626;
 export const DIGEST_BLUE_POST_COLOR = 0x00aeff;
 export const DIGEST_NEWS_COLOR = 0xf8b700;
+
+// The ForeverUpdates app's own emojis (Developer Portal → the app → Emojis).
+export const EMOJI_ALERT = "<:alert:1572629828732198912>";
+export const EMOJI_BLUE_POST = "<:blizz:1569540602910220369>";
+export const EMOJI_NEWS = "<:news:1572629866497581127>";
+const sourceEmoji = (news: boolean) => (news ? EMOJI_NEWS : EMOJI_BLUE_POST);
 
 /** Shortens post markdown for display, marking a cut with " …": see cutMarkdown (whole lines first). */
 export function cutAtSentence(text: string, max: number): { text: string; cut: boolean } {
@@ -74,6 +86,13 @@ export function shortLink(url: string): string {
   return url
     .replace(/^(https:\/\/[a-z]{2}\.forums\.blizzard\.com\/[a-z]{2}\/wow\/t\/)[^/]+\/(\d+\/\d+)$/i, "$1$2")
     .replace(/^(https:\/\/news\.blizzard\.com\/[a-z]{2}-[a-z]{2}\/article\/\d+)\/[^/?#]+$/i, "$1");
+}
+/** A post's lines (blank ones dropped), without a line that is only a date its title already shows. */
+function postLines(text: string, title: string): string[] {
+  return text.split("\n").map(l => l.trimEnd()).filter(l => {
+    const date = stripMarkdown(l.replace(/^#{1,3} /, "")).trim();
+    return l.trim() && !(/^[A-Z][a-z]+ \d{1,2}, \d{4}$/.test(date) && title.includes(date));
+  });
 }
 const linkText = (title: string) => escapeMarkdown(clip(title.replace(/[[\]]/g, "").replace(/\s+/g, " ").trim(), 200));
 /** A Discord ID (a snowflake), e.g. a role's; anything else is ignored rather than sent. */
@@ -116,7 +135,7 @@ export function readOAuthWebhook(w: any): OAuthWebhook | null {
 export const webhookUrl = (id: string, token: string) => `https://discord.com/api/webhooks/${id}/${token}`;
 
 export function buildAlertPayload(
-  item: { title: string; url: string; content: string; summary: string },
+  item: { source: string; title: string; url: string; content: string; summary: string },
   opts: { roleId?: string }
 ): Record<string, unknown> {
   // A Discord quote ends at a line break, so the TL;DR is kept to one line.
@@ -126,15 +145,18 @@ export function buildAlertPayload(
   const watch = video ? `▶ [Watch on YouTube](${video})\n\n` : "";
   // Each line of post text (markdown, escaped when it was extracted) is a paragraph, heading, list
   // item or quote line: a blank line between paragraphs, as on the forum, but a list or quote stays together.
-  const lines = text.split("\n").map(l => l.trimEnd()).filter(l => l.trim());
-  const kind = (l: string) => (/^> /.test(l) ? ">" : /^[ \t]*(?:-|\d+\.) /.test(l) ? "-" : "");
-  const post = cutAtSentence(lines.map((l, i) => (i && kind(l) && kind(l) === kind(lines[i - 1]) ? "\n" : i ? "\n\n" : "") + l).join(""), ALERT_POST_CHARS);
+  // A short line that is all bold and isn't a sentence is a section title (how Blizzard writes them):
+  // a heading, with no blank line around it.
+  const lines = postLines(text, item.title).map(l => l.replace(/^\*\*([^*]{1,80})\*\*$/, (line, t: string) => (/[.!?]$/.test(t) ? line : `### ${t}`)));
+  const kind = (l: string) => (/^> /.test(l) ? ">" : /^[ \t]*(?:-|\d+\.) /.test(l) ? "-" : /^#{1,3} /.test(l) ? "#" : "");
+  const sep = (prev: string, l: string) => (kind(l) === "#" || kind(prev) === "#" || (kind(l) && kind(l) === kind(prev)) ? "\n" : "\n\n");
+  const post = cutAtSentence(lines.map((l, i) => (i ? sep(lines[i - 1], l) : "") + l).join(""), ALERT_POST_CHARS);
   // The title already links to the post; an absurdly long URL just isn't repeated.
   const more = post.cut && item.url.length <= 400 ? `\n[Read the full post](${linkUrl(item.url)})` : "";
   const description = clip(`${tldr}${watch}${post.text}${more}`.trim(), EMBED_DESCRIPTION_LIMIT);
   // Only the configured role can be mentioned (see withRole).
   return withRole({
-    embeds: [{ title: clip(`🚨 ${item.title}`, 256), url: item.url, description: description || escapeMarkdown(clip(item.title, 256)), color: ALERT_COLOR }]
+    embeds: [{ title: clip(`${EMOJI_ALERT}${sourceEmoji(item.source === "Blizzard News")} ${item.title}`, 256), url: item.url, description: description || escapeMarkdown(clip(item.title, 256)), color: ALERT_COLOR }]
   }, opts.roleId);
 }
 
@@ -155,14 +177,16 @@ function shareBudget(needs: number[], budget: number): number[] {
 }
 
 /**
- * The daily digest as ONE message: "N updates today", then a blue embed listing the Blue Posts and
- * a gold one listing the news (oldest first). Each item is its linked title, Gemini's TL;DR and as
- * much of the post as fits: the 6000-character budget is shared so short posts appear in full and
- * long ones are cut at a sentence end. On a busier day excerpts go first, then TL;DRs; if even the
- * linked titles don't all fit, the rest are counted in a closing "…and N more updates" line, along
- * with `extra` items the caller didn't load. Posts of one forum thread (or versions of one article)
- * are one item: the title once, then `threadTldr`'s one TL;DR for the thread (by threadKey) and a link
- * to each post, or without it a line per post. Two posts with the same video are one item, linking both.
+ * The daily digest as ONE message: "N updates today", then one embed per item, oldest first: its
+ * source's emoji and linked title, colored Blizzard blue for a Blue Post and gold for news, then
+ * Gemini's TL;DR and as much of the post as fits. Discord allows 10 embeds a message: on a day with
+ * more items, the first 9 get their own embed and a 10th lists the rest as linked titles. The
+ * 6000-character budget is shared so short posts appear in full and long ones are cut at a sentence
+ * end. On a busier day excerpts go first, then TL;DRs; if even the titles don't all fit, the rest are
+ * counted in a closing "…and N more updates" line, along with `extra` items the caller didn't load.
+ * Posts of one forum thread (or versions of one article) are one item: the title once, then
+ * `threadTldr`'s one TL;DR for the thread (by threadKey) and a link to each post, or without it a line
+ * per post. Two posts with the same video are one item, linking both.
  */
 export function buildDigestMessage(rows: DigestRow[], opts: { extra?: number; threadTldr?: Map<string, string> } = {}): { payload: Record<string, unknown>; shown: number } {
   const extra = Math.max(0, opts.extra ?? 0);
@@ -170,18 +194,16 @@ export function buildDigestMessage(rows: DigestRow[], opts: { extra?: number; th
   const oneLine = (s: string) => s.replace(/\s+/g, " ").trim();
   // Each line without its heading, list or quote prefix, to run together into one paragraph.
   const bodyOf = (text: string) => text.split("\n").map(l => inlineMarkdown(l.trim())).filter(Boolean).join("\n");
-  // A post's own lines, headings and lists kept (blank lines dropped), for its excerpt.
-  const linesOf = (text: string) => text.split("\n").map(l => l.trimEnd()).filter(l => l.trim()).join("\n");
   const found = [...groupByThread(rows)].map(([key, posts]) => {
     const r = posts[0];
     const news = r.source === "Blizzard News";
+    const url = shortLink(r.url);
     if (posts.length === 1) {
       const { video, text } = splitVideo(r.content);
       return {
-        news, n: 1, video, link: linkUrl(shortLink(r.url)), also: [] as string[],
-        head: `**[${linkText(r.title)}](${linkUrl(shortLink(r.url))})**${video ? ` · [▶ Video](${video})` : ""}`,
+        news, n: 1, video, url, title: r.title, also: [] as string[],
         tldr: r.summary?.trim() ? `> ${escapeMarkdown(clip(oneLine(r.summary), 300))}` : "", // a one-line quote box
-        body: linesOf(text)
+        body: postLines(text, r.title).join("\n") // its own lines, headings and lists kept, for its excerpt
       };
     }
     // A thread: its title once, then its one TL;DR for all the posts and a link to each; without that
@@ -198,8 +220,8 @@ export function buildDigestMessage(rows: DigestRow[], opts: { extra?: number; th
     };
     const summary = opts.threadTldr?.get(key)?.trim();
     return {
-      news, n: posts.length, video: undefined as string | undefined, link: "", also: [] as string[],
-      head: `**[${linkText(r.title.replace(/ \((?:edited|updated)\)$/, ""))}](${linkUrl(shortLink(r.url))})** · ${posts.length} ${news ? "versions" : "posts"}`,
+      news, n: posts.length, video: undefined as string | undefined, url, also: [] as string[],
+      title: `${r.title.replace(/ \((?:edited|updated)\)$/, "")} · ${posts.length} ${news ? "versions" : "posts"}`,
       tldr: summary ? `> ${escapeMarkdown(clip(oneLine(summary), 300))}\n${posts.map(link).join(" · ")}` : posts.map(line).join("\n"),
       body: ""
     };
@@ -214,62 +236,62 @@ export function buildDigestMessage(rows: DigestRow[], opts: { extra?: number; th
     if (j === undefined) { byVideo.set(it.video, i); return; }
     const size = (x: typeof it) => x.tldr.length + x.body.length;
     const [keep, drop] = size(found[j]) >= size(it) ? [j, i] : [i, j];
-    found[keep].also.push(`[${found[drop].news ? "Article" : "Forum post"}](${found[drop].link})`, ...found[drop].also);
+    found[keep].also.push(`[${found[drop].news ? "Article" : "Forum post"}](${linkUrl(found[drop].url)})`, ...found[drop].also);
     found[keep].n += found[drop].n;
     merged.add(drop);
     byVideo.set(it.video, keep);
   });
-  const items = found.filter((_, i) => !merged.has(i)).map(it => (it.also.length ? { ...it, head: `${it.head} · ${it.also.join(" · ")}` } : it));
-  const groups = [false, true]; // Blue Posts, then news
-  const SEP = 2;                // "\n\n" between items (counted for each item: a little conservative)
-  const closing = (more: number) => `\n\n…and ${more} more update${more === 1 ? "" : "s"}`;
-  // The longest the closing line can be, reserved in every limit whenever it may be needed.
-  const tailRoom = (needed: boolean) => (needed ? closing(count).length : 0);
+  const items = found.filter((_, i) => !merged.has(i)).map(it => {
+    const emoji = sourceEmoji(it.news);
+    // The video and the other posts' links: an embed title can't hold links, so they lead the text.
+    const links = [it.video ? `[▶ Video](${it.video})` : "", ...it.also].filter(Boolean).join(" · ");
+    return {
+      ...it, links,
+      title: clip(`${emoji} ${oneLine(it.title)}`, 256),
+      // The item as one line of the overflow list.
+      head: `${emoji} **[${linkText(it.title)}](${linkUrl(it.url)})**${links ? ` · ${links}` : ""}`
+    };
+  });
+  const boxes = items.length <= EMBEDS_PER_MESSAGE ? items.length : EMBEDS_PER_MESSAGE - 1;
+  const closing = (more: number) => `…and ${more} more update${more === 1 ? "" : "s"}`;
+  // The longest the closing line can be (with its "\n\n"), reserved in every limit whenever it may be needed.
+  const tailRoom = (needed: boolean) => (needed ? closing(count).length + 2 : 0);
 
-  const render = (texts: string[], more: number) => {
-    const embeds: { description: string; color: number }[] = [];
-    for (const news of groups) {
-      const lines = texts.filter((t, i) => t && items[i].news === news);
-      if (lines.length) embeds.push({ description: lines.join("\n\n"), color: news ? DIGEST_NEWS_COLOR : DIGEST_BLUE_POST_COLOR });
-    }
+  // The first `shownBoxes` items as embeds (descs: their text), then the overflow list.
+  const render = (descs: string[], shownBoxes: number, listed: string[], more: number) => {
+    const embeds: { title?: string; url?: string; description?: string; color: number }[] = items.slice(0, shownBoxes).map((it, i) => ({
+      title: it.title, url: it.url, ...(descs[i] ? { description: descs[i] } : {}),
+      color: it.news ? DIGEST_NEWS_COLOR : DIGEST_BLUE_POST_COLOR
+    }));
+    if (listed.length) embeds.push({ description: listed.join("\n"), color: DIGEST_BLUE_POST_COLOR });
     if (more) {
-      if (embeds.length) embeds[embeds.length - 1].description += closing(more);
-      else embeds.push({ description: closing(more).trim(), color: DIGEST_BLUE_POST_COLOR });
+      if (!embeds.length) embeds.push({ color: DIGEST_BLUE_POST_COLOR });
+      const last = embeds[embeds.length - 1];
+      last.description = last.description ? `${last.description}\n\n${closing(more)}` : closing(more);
     }
     return embeds;
   };
 
-  // 1-2: linked title + TL;DR (+ a share of the post); 3: linked titles only.
-  const budget = DIGEST_BUDGET - tailRoom(extra > 0);
-  const cap = EMBED_DESCRIPTION_LIMIT - tailRoom(extra > 0);
+  // 1-2: title, links + TL;DR (+ a share of the post); without TL;DRs if they don't all fit.
+  const tail = tailRoom(extra > 0);
+  const budget = DIGEST_BUDGET - tail;
+  const listed = items.slice(boxes).map(it => it.head);
+  const listCost = listed.reduce((n, h) => n + h.length + 1, 0);
+  const boxed = items.slice(0, boxes);
   for (const withTldr of [true, false]) {
-    const fixed = items.map(it => it.head.length + (withTldr && it.tldr ? 1 + it.tldr.length : 0) + SEP);
-    const fixedOf = (news: boolean) => fixed.reduce((n, f, i) => n + (items[i].news === news ? f : 0), 0);
-    const total = fixed.reduce((a, b) => a + b, 0);
-    if (total > budget || groups.some(g => fixedOf(g) > cap)) continue;
+    const lead = (it: (typeof items)[number]) => [it.links, withTldr ? it.tldr : ""].filter(Boolean);
+    const fixedDesc = boxed.map(it => lead(it).reduce((n, p) => n + p.length + 1, 0));
+    const total = boxed.reduce((n, it, i) => n + it.title.length + fixedDesc[i], 0) + listCost;
+    // Every embed's own text must fit too (a thread of many posts lists a line for each).
+    if (total > budget || listCost + tail > EMBED_DESCRIPTION_LIMIT || fixedDesc.some(f => f + tail > EMBED_DESCRIPTION_LIMIT)) continue;
 
-    // +1 for "\n"; headings become bold lines, up to 2 characters more each.
+    // +1 for "\n"; headings become bold lines, up to 2 characters more each. No more than its
+    // embed's description holds.
     const boldRoom = (body: string) => 2 * (body.match(/^(?:> )?#{1,3} /gm)?.length ?? 0);
-    const needs = items.map(it => (withTldr && it.body ? it.body.length + 1 + boldRoom(it.body) : 0));
+    const needs = boxed.map((it, i) => (withTldr && it.body ? Math.max(0, Math.min(it.body.length + 1 + boldRoom(it.body), EMBED_DESCRIPTION_LIMIT - tail - fixedDesc[i])) : 0));
     const share = shareBudget(needs, budget - total);
-    // Each embed's description also has its own limit: cap a group that went over, and give what
-    // it frees to the other group.
-    for (let pass = 0; pass < 2; pass++) {
-      for (const g of groups) {
-        const idx = items.map((it, i) => i).filter(i => items[i].news === g);
-        const room = cap - fixedOf(g);
-        if (idx.reduce((n, i) => n + share[i], 0) <= room) continue;
-        const capped = shareBudget(idx.map(i => needs[i]), room);
-        idx.forEach((i, k) => { share[i] = capped[k]; });
-        const otherIdx = items.map((it, i) => i).filter(i => items[i].news !== g);
-        const left = Math.min(cap - fixedOf(!g), budget - total - capped.reduce((a, b) => a + b, 0));
-        const other = shareBudget(otherIdx.map(i => needs[i]), left);
-        otherIdx.forEach((i, k) => { share[i] = other[k]; });
-      }
-    }
-    const texts = items.map((it, i) => {
-      const parts = [it.head];
-      if (withTldr && it.tldr) parts.push(it.tldr);
+    const descs = boxed.map((it, i) => {
+      const parts = lead(it);
       // Headings become bold lines, no bigger than the item's title: their text as plain (escaped)
       // text, so nothing inside (bold, code, a link) can meet the added markers. One that would come
       // out longer than its room stays a heading.
@@ -283,28 +305,25 @@ export function buildDigestMessage(rows: DigestRow[], opts: { extra?: number; th
       }
       return parts.join("\n");
     });
-    return { payload: digestPayload(count, render(texts, extra)), shown: rows.length };
+    return { payload: digestPayload(count, render(descs, boxes, listed, extra)), shown: rows.length };
   }
 
-  // 4: as many linked titles as fit, in order; the rest counted. A full embed doesn't stop the
-  // other one from filling.
-  const texts = items.map(() => "");
-  const tail = tailRoom(true);
-  const usedIn = { true: 0, false: 0 } as Record<string, number>;
-  let used = 0, shown = 0;
+  // 3: titles and links only, as many as fit, in order; the rest counted.
+  const fullTail = tailRoom(true);
+  const descs: string[] = [], heads: string[] = [];
+  let used = 0, listUsed = 0, shown = 0, shownBoxes = 0;
   for (const [i, it] of items.entries()) {
-    const cost = it.head.length + SEP;
-    if (used + cost + tail > DIGEST_BUDGET) break;
-    if (usedIn[String(it.news)] + cost + tail > EMBED_DESCRIPTION_LIMIT) continue;
-    texts[i] = it.head;
+    const inBox = i < boxes;
+    const cost = inBox ? it.title.length + it.links.length + 1 : it.head.length + 1;
+    if (used + cost + fullTail > DIGEST_BUDGET || (inBox ? it.links.length : listUsed + cost) + fullTail > EMBED_DESCRIPTION_LIMIT) break;
+    if (inBox) { descs.push(it.links); shownBoxes++; } else { heads.push(it.head); listUsed += cost; }
     used += cost;
-    usedIn[String(it.news)] += cost;
     shown += it.n;
   }
-  return { payload: digestPayload(count, render(texts, count - shown)), shown };
+  return { payload: digestPayload(count, render(descs, shownBoxes, heads, count - shown)), shown };
 }
 
-function digestPayload(count: number, embeds: { description: string; color: number }[]): Record<string, unknown> {
+function digestPayload(count: number, embeds: Record<string, unknown>[]): Record<string, unknown> {
   return { content: `${count} update${count === 1 ? "" : "s"} today`, allowed_mentions: { parse: [] }, embeds };
 }
 
@@ -333,7 +352,7 @@ export function welcomePayload(nextDigest: number): Record<string, unknown> {
 export function testAlertPayload(): Record<string, unknown> {
   return {
     content: "Test alert from ForeverUpdates.",
-    embeds: [{ title: "🔔 Test alert", description: "This is only a test: urgent WoW: Forever alerts will be posted here like this, pinging the role set on the settings page.", color: ALERT_COLOR }]
+    embeds: [{ title: `${EMOJI_ALERT} Test alert`, description: "This is only a test: urgent WoW: Forever alerts will be posted here like this, pinging the role set on the settings page.", color: ALERT_COLOR }]
   };
 }
 

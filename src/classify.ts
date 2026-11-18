@@ -85,7 +85,7 @@ export async function handleClassifyBatch(batch: MessageBatch<ClassifyMessage>, 
     }
     // Other servers' channels get the same alert (with their own role), stored with the result.
     if (critical) {
-      const payload = buildAlertPayload({ title: row.title, url: row.url, content: row.content, summary: d.cls.summary }, {});
+      const payload = buildAlertPayload({ source: row.source, title: row.title, url: row.url, content: row.content, summary: d.cls.summary }, {});
       const [broadcast, deliveries] = broadcastStmts(db, row.id, "alert", payload);
       stmts.push(broadcast);
       fanouts.push({ at: stmts.length, id: row.id });
@@ -128,7 +128,7 @@ export async function handleClassifyBatch(batch: MessageBatch<ClassifyMessage>, 
     const d = decided.get(row.id);
     if (!d || !(!!row.forum_verified || d.cls.is_forever_relevant) || !d.cls.is_critical) continue;
     const sent = await trySendAlert(env, {
-      id: row.id, title: row.title, url: row.url, content: row.content, summary: d.cls.summary, alert_state: "pending"
+      id: row.id, source: row.source, title: row.title, url: row.url, content: row.content, summary: d.cls.summary, alert_state: "pending"
     });
     if (!sent) {
       // If even the enqueue fails, the sweeper re-queues pending alerts after NUDGE_AFTER_MIN.

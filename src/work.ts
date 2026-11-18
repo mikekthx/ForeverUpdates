@@ -226,11 +226,11 @@ export async function processFetch(env: Env, key: string, baseline: boolean, att
 // ───────────────────────────── Alerts ─────────────────────────────
 
 interface AlertRow {
-  id: string; title: string; url: string; content: string; summary: string; alert_state: string | null;
+  id: string; source: string; title: string; url: string; content: string; summary: string; alert_state: string | null;
 }
 
 function alertPayload(env: Env, row: AlertRow): Record<string, unknown> {
-  return buildAlertPayload({ title: row.title, url: row.url, content: row.content ?? "", summary: row.summary ?? "" }, { roleId: env.DISCORD_CRITICAL_ROLE_ID });
+  return buildAlertPayload({ source: row.source, title: row.title, url: row.url, content: row.content ?? "", summary: row.summary ?? "" }, { roleId: env.DISCORD_CRITICAL_ROLE_ID });
 }
 
 async function sendAlert(env: Env, row: AlertRow): Promise<void> {

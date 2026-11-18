@@ -156,11 +156,11 @@ ok(`markdown shows exactly the text of every post and article (${formatted} keep
 
 // What Discord gets for each of them: an alert each, and one digest of them all. Every line is
 // balanced (nothing left open by a cut) and within Discord's limits.
-const items = Object.entries<any>(cap.responses).flatMap(([k, r]) => {
+const items = Object.entries<any>(cap.responses).flatMap(([k, r], i) => {
   if (r.status !== 200) return [];
   const content = k.startsWith("news-article-") ? clipMarkdown(extractArticleFullText(r.body), NEWS_CONTENT_MAX)
     : /-post-/.test(k) ? clipMarkdown(postText(JSON.parse(r.body).cooked), FORUM_CONTENT_MAX) : null;
-  return content ? [{ id: k, source: k.startsWith("news") ? "Blizzard News" : "Blue Post (US)", title: k, url: `https://news.blizzard.com/en-us/article/1/${k}`, summary: "A **TL;DR**.", content }] : [];
+  return content ? [{ id: k, source: k.startsWith("news") ? "Blizzard News" : "Blue Post (US)", title: k, url: `https://news.blizzard.com/en-us/article/${i + 1}/${k}`, summary: "A **TL;DR**.", content }] : [];
 });
 const balanced = (where: string, d: string) => {
   for (const l of d.split("\n")) assert.ok(lineBalanced(l), `${where}: a line with formatting left open: "${l.slice(0, 80)}"`);
@@ -172,7 +172,8 @@ for (const it of items) {
 }
 const digest = buildDigestMessage(items).payload as any;
 assert.ok(digest.embeds.reduce((n: number, e: any) => n + embedTextLength(e), 0) <= DISCORD_EMBED_TOTAL_LIMIT);
-for (const e of digest.embeds) { assert.ok(e.description.length <= 4096); balanced("digest", e.description); }
+for (const e of digest.embeds) { assert.ok((e.title || e.description) && (e.description ?? "").length <= 4096); balanced("digest", e.description ?? ""); }
+assert.ok(digest.embeds.length > 1, "each real post is its own item");
 ok(`${items.length} alerts and their digest: every line balanced, within Discord's limits`);
 console.log("\n  " + notes.join("\n  "));
 console.log(`\n${n} real-data checks passed`);

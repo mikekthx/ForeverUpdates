@@ -8,7 +8,7 @@ import { pickForeverCategories, flattenCategoryList, parseTracker, parseSearch, 
 import { heuristicClassify, sanitizeClassification } from "../src/lib/classify.ts";
 import { parseRoleInput, readOAuthWebhook, roleNoticePayload, welcomePayload, withRole, webhookUrl } from "../src/lib/discord.ts";
 import { htmlEscape, landingPage, managePage, messagePage } from "../src/lib/pages.ts";
-import { buildDigestMessage, buildAlertPayload, cutAtSentence, shortLink, threadKey, embedTextLength, DISCORD_EMBED_TOTAL_LIMIT, DIGEST_BLUE_POST_COLOR, DIGEST_NEWS_COLOR, ALERT_COLOR } from "../src/lib/discord.ts";
+import { buildDigestMessage, buildAlertPayload, cutAtSentence, shortLink, threadKey, embedTextLength, DISCORD_EMBED_TOTAL_LIMIT, DIGEST_BLUE_POST_COLOR, DIGEST_NEWS_COLOR, ALERT_COLOR, EMOJI_ALERT, EMOJI_BLUE_POST, EMOJI_NEWS } from "../src/lib/discord.ts";
 import { fingerprintNew, fingerprintEdit } from "../src/lib/fingerprint.ts";
 import { initialWatchTier } from "../src/poller.ts";
 import { forumRegions, wantedNewsTitle } from "../src/sources.ts";
@@ -176,8 +176,16 @@ assert.equal(updateFocus(edited("**Known Issues**\n- Old issue.\n**Quests**\n[NE
   "**Quests**\n- A quest giver is missing.", "a fix added under an existing header keeps that header");
 assert.equal(updateFocus(edited("**Classes**\n- **Hunter**\n  - Old fix.\n[NEW]   - New fix.\n  - Older fix.\n[NEW]   - Another fix."))!.shown,
   "**Classes**\n- **Hunter**\n  - New fix.\n  - Another fix.", "headers above older fixes in the section still show, once");
-const hotfixAlert = (buildAlertPayload({ title: "t", url: "https://e/x", content: hotfixEdit, summary: "" }, {}) as any).embeds[0].description;
-assert.ok(hotfixAlert.includes("**Classes**\n\n- **Hunter**\n  - Pets have 115% health.") && !hotfixAlert.includes("Old short fix") && !hotfixAlert.includes("Intro"), "the alert shows it too");
+// The alert shows it too: all-bold section titles as headings, no blank lines around them, and
+// no date line when the title already shows that date.
+const hotfixAlert = (title: string) => (buildAlertPayload({ source: "Blue Post (US)", title, url: "https://e/x", content: hotfixEdit, summary: "" }, {}) as any).embeds[0].description;
+assert.equal(hotfixAlert("WoW: Forever Hotfixes - November 10, 2026"),
+  "- Fixed mail delivery.\n### Classes\n- **Hunter**\n  - Pets have 115% health.\n- Late fix.\n## Professions\n- **Mining**\n  - Ore respawns faster.");
+assert.ok(hotfixAlert("Hotfixes").startsWith("### November 10, 2026\n- Fixed mail delivery."), "a date the title doesn't show stays");
+// A bold sentence or long bold line stays a bold paragraph: only short labels become headings.
+const boldAlert = (line: string) => (buildAlertPayload({ source: "Blue Post (US)", title: "t", url: "https://e/x", content: `Intro.\n${line}\nEnd.`, summary: "" }, {}) as any).embeds[0].description;
+assert.equal(boldAlert("**Maintenance has been extended by 2 hours.**"), "Intro.\n\n**Maintenance has been extended by 2 hours.**\n\nEnd.");
+assert.equal(boldAlert(`**${"Long bold label ".repeat(6)}x**`), `Intro.\n\n**${"Long bold label ".repeat(6)}x**\n\nEnd.`);
 assert.equal(updateFocus(hotfixEdit)!.newText.includes("Classes"), false, "the model still judges only [NEW] lines");
 ok("heuristicClassify judges edits by their [NEW] lines and section headers only");
 
@@ -510,14 +518,15 @@ assert.equal(clipMarkdown("**one**\n**two words here**", 15), "**one**\ntwo …"
 assert.equal(clipMarkdown("[NEW] **a b c d e f**", 12), "[NEW] a b …", "an edit's [NEW] mark survives the cut");
 ok("htmlToMarkdown keeps Discord-supported formatting; stripMarkdown / plainLine / clipMarkdown");
 
-// Alert: red bar, 🚨 linked title, TL;DR, then the post (cut, with a link to the rest); nothing else
+// Alert: red bar, alert + source emojis and linked title, TL;DR, then the post (cut, with a link to the rest); nothing else
 const longPost = Array.from({ length: 60 }, (_, i) => `Line ${i}: realms are restarting for maintenance in the next hour.`).join("\n");
-const alert = buildAlertPayload({ title: "x".repeat(400), url: "https://us.forums.blizzard.com/en/wow/t/x/1/1", content: longPost, summary: "@everyone Realms restart within the hour." }, {}) as any;
+const alert = buildAlertPayload({ source: "Blue Post (US)", title: "x".repeat(400), url: "https://us.forums.blizzard.com/en/wow/t/x/1/1", content: longPost, summary: "@everyone Realms restart within the hour." }, {}) as any;
 const ae = alert.embeds[0];
 assert.deepEqual(alert.allowed_mentions, { parse: [] });
 assert.equal(alert.content, undefined);
 assert.equal(alert.embeds.length, 1);
-assert.ok(ae.title.startsWith("🚨 ") && ae.title.length <= 256);
+assert.ok(ae.title.startsWith(`${EMOJI_ALERT}${EMOJI_BLUE_POST} x`) && ae.title.length <= 256);
+assert.equal((buildAlertPayload({ source: "Blizzard News", title: "Maintenance", url: "https://e/x", content: "x", summary: "" }, {}) as any).embeds[0].title, `${EMOJI_ALERT}${EMOJI_NEWS} Maintenance`);
 assert.equal(ae.url, "https://us.forums.blizzard.com/en/wow/t/x/1/1");
 assert.equal(ae.color, ALERT_COLOR);
 assert.equal(ae.fields, undefined, "no Source / Category / Why it's critical");
@@ -526,38 +535,38 @@ assert.equal(ae.footer, undefined, "no footer");
 assert.ok(ae.description.startsWith("> **TL;DR:** @everyone Realms restart within the hour.\n\nLine 0: realms are restarting for maintenance in the next hour.\n\nLine 1: "));
 assert.ok(ae.description.endsWith("[Read the full post](https://us.forums.blizzard.com/en/wow/t/x/1/1)"));
 assert.ok(ae.description.length <= 2000, `alert description ${ae.description.length} chars`);
-const shortAlert = buildAlertPayload({ title: "Queues", url: "https://e/x", content: "Login queues are long. Adding capacity.", summary: "" }, { roleId: " 123456789012345678 " }) as any;
+const shortAlert = buildAlertPayload({ source: "Blue Post (US)", title: "Queues", url: "https://e/x", content: "Login queues are long. Adding capacity.", summary: "" }, { roleId: " 123456789012345678 " }) as any;
 assert.equal(shortAlert.embeds[0].description, "Login queues are long. Adding capacity.", "no TL;DR line when Gemini gave none; short post in full, no link");
-assert.equal((buildAlertPayload({ title: "t", url: "https://e/x", content: "First paragraph.\nSecond paragraph.", summary: "" }, {}) as any).embeds[0].description,
+assert.equal((buildAlertPayload({ source: "Blue Post (US)", title: "t", url: "https://e/x", content: "First paragraph.\nSecond paragraph.", summary: "" }, {}) as any).embeds[0].description,
   "First paragraph.\n\nSecond paragraph.", "paragraphs stay apart, as on the forum");
-assert.equal((buildAlertPayload({ title: "t", url: "https://e/x", content: "One.\n\n\nTwo.", summary: "Line one\nline two." }, {}) as any).embeds[0].description,
+assert.equal((buildAlertPayload({ source: "Blue Post (US)", title: "t", url: "https://e/x", content: "One.\n\n\nTwo.", summary: "Line one\nline two." }, {}) as any).embeds[0].description,
   "> **TL;DR:** Line one line two.\n\nOne.\n\nTwo.", "a two-line TL;DR stays in its quote box; blank lines don't pile up");
-assert.ok((buildDigestMessage([{ id: "x", source: "Blizzard News", title: "T", url: "https://e/x", summary: "A\nB", content: "Body." }]).payload as any).embeds[0].description.includes("\n> A B\n"));
+assert.ok((buildDigestMessage([{ id: "x", source: "Blizzard News", title: "T", url: "https://e/x", summary: "A\nB", content: "Body." }]).payload as any).embeds[0].description.startsWith("> A B\n"));
 assert.equal(shortAlert.content, "<@&123456789012345678>");
 assert.deepEqual(shortAlert.allowed_mentions, { parse: [], roles: ["123456789012345678"] });
-const badRole = buildAlertPayload({ title: "Queues", url: "https://e/x", content: "x", summary: "" }, { roleId: "everyone>" + "9".repeat(3000) }) as any;
+const badRole = buildAlertPayload({ source: "Blue Post (US)", title: "Queues", url: "https://e/x", content: "x", summary: "" }, { roleId: "everyone>" + "9".repeat(3000) }) as any;
 assert.deepEqual([badRole.content, badRole.allowed_mentions], [undefined, { parse: [] }], "a malformed role ID is ignored, not sent");
-const editAlert = buildAlertPayload({ title: "Known Issues (edited)", url: "https://e/k", content: `${UPDATE_MARKER}\nWe are tracking these issues.\n[NEW] Some realms are offline.\nQuest givers missing.`, summary: "" }, {}) as any;
+const editAlert = buildAlertPayload({ source: "Blue Post (US)", title: "Known Issues (edited)", url: "https://e/k", content: `${UPDATE_MARKER}\nWe are tracking these issues.\n[NEW] Some realms are offline.\nQuest givers missing.`, summary: "" }, {}) as any;
 assert.equal(editAlert.embeds[0].description, "Some realms are offline.", "an edit shows only the added lines");
-const parenAlert = buildAlertPayload({ title: "x", url: "https://e/a_(b)/c", content: "Word ".repeat(600), summary: "" }, {}) as any;
+const parenAlert = buildAlertPayload({ source: "Blue Post (US)", title: "x", url: "https://e/a_(b)/c", content: "Word ".repeat(600), summary: "" }, {}) as any;
 assert.ok(parenAlert.embeds[0].description.endsWith("[Read the full post](https://e/a%5F%28b%29/c)"), "parentheses in a link are encoded");
-const emptyAlert = buildAlertPayload({ title: "**Hotfix** notes", url: "https://e/x", content: "", summary: "" }, {}) as any;
+const emptyAlert = buildAlertPayload({ source: "Blue Post (US)", title: "**Hotfix** notes", url: "https://e/x", content: "", summary: "" }, {}) as any;
 assert.equal(emptyAlert.embeds[0].description, "\\*\\*Hotfix\\*\\* notes", "the title stand-in is escaped too");
 // A post's video (the first line of its text, put there by postText/extractArticleFullText) gets
 // its own line after the TL;DR, so cutting a long post never drops it.
-assert.equal((buildAlertPayload({ title: "t", url: "https://e/x", content: "https://youtu.be/bzaMA5fZ1tE\nListen to this week's episode.", summary: "New episode." }, {}) as any).embeds[0].description,
+assert.equal((buildAlertPayload({ source: "Blue Post (US)", title: "t", url: "https://e/x", content: "https://youtu.be/bzaMA5fZ1tE\nListen to this week's episode.", summary: "New episode." }, {}) as any).embeds[0].description,
   "> **TL;DR:** New episode.\n\n▶ [Watch on YouTube](https://youtu.be/bzaMA5fZ1tE)\n\nListen to this week's episode.");
-assert.equal((buildAlertPayload({ title: "t", url: "https://e/x", content: "https://youtu.be/bzaMA5fZ1tE", summary: "" }, {}) as any).embeds[0].description,
+assert.equal((buildAlertPayload({ source: "Blue Post (US)", title: "t", url: "https://e/x", content: "https://youtu.be/bzaMA5fZ1tE", summary: "" }, {}) as any).embeds[0].description,
   "▶ [Watch on YouTube](https://youtu.be/bzaMA5fZ1tE)", "a video with no text");
-assert.ok((buildAlertPayload({ title: "t", url: "https://e/x", content: "https://youtu.be/bzaMA5fZ1tE\n" + "Word ".repeat(600), summary: "" }, {}) as any).embeds[0].description.startsWith("▶ [Watch on YouTube]"), "kept when the post is cut");
-assert.equal((buildAlertPayload({ title: "t", url: "https://e/x", content: "See https://youtu.be/bzaMA5fZ1tE\nhttps://youtu.be/bzaMA5fZ1tE", summary: "" }, {}) as any).embeds[0].description,
+assert.ok((buildAlertPayload({ source: "Blue Post (US)", title: "t", url: "https://e/x", content: "https://youtu.be/bzaMA5fZ1tE\n" + "Word ".repeat(600), summary: "" }, {}) as any).embeds[0].description.startsWith("▶ [Watch on YouTube]"), "kept when the post is cut");
+assert.equal((buildAlertPayload({ source: "Blue Post (US)", title: "t", url: "https://e/x", content: "See https://youtu.be/bzaMA5fZ1tE\nhttps://youtu.be/bzaMA5fZ1tE", summary: "" }, {}) as any).embeds[0].description,
   "See https://youtu.be/bzaMA5fZ1tE\n\nhttps://youtu.be/bzaMA5fZ1tE", "only a link on the first line is the post's video");
 // An edit shows only the added lines, but still the post's video, whether or not it's new.
-assert.equal((buildAlertPayload({ title: "t", url: "https://e/x", content: `${UPDATE_MARKER}\nhttps://youtu.be/bzaMA5fZ1tE\nOld line.\n[NEW] A new line.`, summary: "" }, {}) as any).embeds[0].description,
+assert.equal((buildAlertPayload({ source: "Blue Post (US)", title: "t", url: "https://e/x", content: `${UPDATE_MARKER}\nhttps://youtu.be/bzaMA5fZ1tE\nOld line.\n[NEW] A new line.`, summary: "" }, {}) as any).embeds[0].description,
   "▶ [Watch on YouTube](https://youtu.be/bzaMA5fZ1tE)\n\nA new line.");
-assert.equal((buildAlertPayload({ title: "t", url: "https://e/x", content: `${UPDATE_MARKER}\n[NEW] https://youtu.be/bzaMA5fZ1tE\nOld line.\n[NEW] A new line.`, summary: "" }, {}) as any).embeds[0].description,
+assert.equal((buildAlertPayload({ source: "Blue Post (US)", title: "t", url: "https://e/x", content: `${UPDATE_MARKER}\n[NEW] https://youtu.be/bzaMA5fZ1tE\nOld line.\n[NEW] A new line.`, summary: "" }, {}) as any).embeds[0].description,
   "▶ [Watch on YouTube](https://youtu.be/bzaMA5fZ1tE)\n\nA new line.", "a newly added video isn't shown twice");
-ok("buildAlertPayload: linked 🚨 title, TL;DR, the post (cut), role ping only if configured");
+ok("buildAlertPayload: alert + source emojis, linked title, TL;DR, the post (cut), role ping only if configured");
 
 // Digest links leave out the title words (Blizzard redirects to the full URL; checked 2026-11-04)
 assert.equal(shortLink("https://us.forums.blizzard.com/en/wow/t/overly-restrictive-name-check-and-fix-incoming-october-27/2394467/1"), "https://us.forums.blizzard.com/en/wow/t/2394467/1");
@@ -566,95 +575,128 @@ assert.equal(shortLink("https://us.forums.blizzard.com/en/wow/t/2394467/1"), "ht
 assert.equal(shortLink("https://example.com/en/wow/t/slug/1/1"), "https://example.com/en/wow/t/slug/1/1", "other hosts unchanged");
 ok("shortLink: forum topics and news articles by id, without the title words");
 
-// Digest: ONE message, Blue Posts in a blue embed and news in a gold one, sized to fit
+// Digest: ONE message, an embed per item in order (Blue Posts blue, news gold), sized to fit
 const blue = (i: number, body: string, summary = `TL;DR ${i}.`) => ({ id: `b${i}`, source: "Blue Post (US)", title: `Blue post ${i}`, url: `https://us.forums.blizzard.com/en/wow/t/t/${i}/1`, summary, content: body });
 const news = (i: number, body: string) => ({ id: `n${i}`, source: "Blizzard News", title: `News ${i}`, url: `https://news.blizzard.com/en-us/article/${i}/x`, summary: `News TL;DR ${i}.`, content: body });
 const fits = (payload: any) => {
   const total = payload.embeds.reduce((n: number, e: any) => n + embedTextLength(e), 0);
   assert.ok(total <= DISCORD_EMBED_TOTAL_LIMIT, `digest is ${total} chars`);
   assert.ok(payload.embeds.length <= 10);
-  for (const e of payload.embeds) assert.ok(e.description.length <= 4096, `embed description ${e.description.length} chars`);
+  for (const e of payload.embeds) {
+    assert.ok((e.description ?? "").length <= 4096, `embed description ${e.description?.length} chars`);
+    assert.ok((e.title ?? "").length <= 256);
+    assert.ok(e.title || e.description, "no empty embed");
+  }
+  // Discord shows only the first of several embeds with one URL.
+  const urls = payload.embeds.map((e: any) => e.url).filter(Boolean);
+  assert.equal(new Set(urls).size, urls.length, "every embed URL is different");
   assert.deepEqual(payload.allowed_mentions, { parse: [] });
 };
+const descs = (d: { payload: any }) => d.payload.embeds.map((e: any) => e.description ?? "");
 const d3 = buildDigestMessage([blue(1, "Short blue post."), news(1, "Short news body."), blue(2, "Another short one.")]);
 fits(d3.payload);
 assert.equal((d3.payload as any).content, "3 updates today");
-assert.deepEqual((d3.payload as any).embeds.map((e: any) => e.color), [DIGEST_BLUE_POST_COLOR, DIGEST_NEWS_COLOR]);
-assert.equal((d3.payload as any).embeds[0].description,
-  "**[Blue post 1](https://us.forums.blizzard.com/en/wow/t/1/1)**\n> TL;DR 1.\nShort blue post.\n\n**[Blue post 2](https://us.forums.blizzard.com/en/wow/t/2/1)**\n> TL;DR 2.\nAnother short one.");
+assert.deepEqual((d3.payload as any).embeds, [
+  { title: `${EMOJI_BLUE_POST} Blue post 1`, url: "https://us.forums.blizzard.com/en/wow/t/1/1", description: "> TL;DR 1.\nShort blue post.", color: DIGEST_BLUE_POST_COLOR },
+  { title: `${EMOJI_NEWS} News 1`, url: "https://news.blizzard.com/en-us/article/1", description: "> News TL;DR 1.\nShort news body.", color: DIGEST_NEWS_COLOR },
+  { title: `${EMOJI_BLUE_POST} Blue post 2`, url: "https://us.forums.blizzard.com/en/wow/t/2/1", description: "> TL;DR 2.\nAnother short one.", color: DIGEST_BLUE_POST_COLOR }
+], "an embed per item, in the order given (oldest first)");
 assert.equal(d3.shown, 3);
 assert.equal((buildDigestMessage([news(1, "Body.")]).payload as any).content, "1 update today");
-assert.equal((buildDigestMessage([news(1, "Body.")]).payload as any).embeds.length, 1, "no empty Blue Post embed");
+assert.equal((buildDigestMessage([news(1, "Body.")]).payload as any).embeds.length, 1);
 
-// Fair share: a short post appears in full; the long one gets the room that's left, cut at a sentence.
+// Fair share: a short post appears in full; the long one gets the room that's left (no more than its
+// embed holds), cut at a sentence.
 const essay = Array.from({ length: 400 }, (_, i) => `Sentence number ${i} of a very long hotfix list.`).join(" ");
 const dFair = buildDigestMessage([blue(1, "Tiny post that should appear in full."), news(1, essay)]);
 fits(dFair.payload);
-const fairText = (dFair.payload as any).embeds.map((e: any) => e.description).join("\n");
-assert.ok(fairText.includes("Tiny post that should appear in full."));
-assert.match(fairText, /Sentence number \d+ of a very long hotfix list\. …/);
-assert.ok(fairText.length > 4000, "the long post uses the room the short one doesn't need");
+assert.equal(descs(dFair)[0], "> TL;DR 1.\nTiny post that should appear in full.");
+assert.match(descs(dFair)[1], /Sentence number \d+ of a very long hotfix list\. …$/);
+assert.ok(descs(dFair)[1].length > 4000, "the long post uses the room the short one doesn't need");
+
+// Exactly 10 items: an embed each. 11: nine embeds, then the rest as a list of linked titles, in order.
+const ten = Array.from({ length: 10 }, (_, i) => blue(i, "Short."));
+assert.deepEqual((buildDigestMessage(ten).payload as any).embeds.map((e: any) => e.title), ten.map(r => `${EMOJI_BLUE_POST} ${r.title}`));
+const d11 = buildDigestMessage([...ten, news(10, "Short.")]);
+fits(d11.payload);
+assert.equal((d11.payload as any).embeds.length, 10);
+assert.deepEqual((d11.payload as any).embeds.slice(0, 9).map((e: any) => e.title), ten.slice(0, 9).map(r => `${EMOJI_BLUE_POST} ${r.title}`));
+assert.deepEqual((d11.payload as any).embeds[9], {
+  description: `${EMOJI_BLUE_POST} **[Blue post 9](https://us.forums.blizzard.com/en/wow/t/9/1)**\n${EMOJI_NEWS} **[News 10](https://news.blizzard.com/en-us/article/10)**`,
+  color: DIGEST_BLUE_POST_COLOR
+});
+assert.equal(d11.shown, 11);
 
 // Busy day: 40 long posts still make one message; every title is there.
 const busy = Array.from({ length: 40 }, (_, i) => i % 3 ? blue(i, essay) : news(i, essay));
 const dBusy = buildDigestMessage(busy);
 fits(dBusy.payload);
-const busyText = (dBusy.payload as any).embeds.map((e: any) => e.description).join("\n");
-for (const r of busy) assert.ok(busyText.includes(`[${r.title}](${shortLink(r.url)})`), `${r.title} missing`);
+assert.deepEqual((dBusy.payload as any).embeds.slice(0, 9).map((e: any) => e.title), busy.slice(0, 9).map(r => `${r.source === "Blizzard News" ? EMOJI_NEWS : EMOJI_BLUE_POST} ${r.title}`));
+for (const r of busy.slice(9)) assert.ok(descs(dBusy)[9].includes(`[${r.title}](${shortLink(r.url)})`), `${r.title} missing`);
 assert.equal(dBusy.shown, 40);
+
+// Stage 2: nine long TL;DRs and a long list don't all fit, so the boxes drop their TL;DRs (and, with
+// no video, have only a title); every item is still shown.
+const stage2 = buildDigestMessage([...Array.from({ length: 9 }, (_, i) => blue(i, "x", "A long TL;DR. ".repeat(30))), ...Array.from({ length: 30 }, (_, i) => blue(100 + i, "x"))]);
+fits(stage2.payload);
+assert.ok((stage2.payload as any).embeds.slice(0, 9).every((e: any) => e.title && e.description === undefined));
+assert.ok(!descs(stage2)[9].includes("TL;DR") && descs(stage2)[9].includes("[Blue post 129]"));
+assert.equal(stage2.shown, 39);
 
 // Extreme day: more than fits even as bare titles → the rest is counted, never dropped silently.
 const flood = Array.from({ length: 200 }, (_, i) => blue(i, essay, "A fairly long TL;DR sentence that takes up some room in the digest."));
 const dFlood = buildDigestMessage(flood);
 fits(dFlood.payload);
-const floodText = (dFlood.payload as any).embeds.map((e: any) => e.description).join("\n");
 assert.ok(dFlood.shown < 200);
-assert.ok(floodText.endsWith(`…and ${200 - dFlood.shown} more updates`), floodText.slice(-80));
+assert.ok(descs(dFlood).at(-1).endsWith(`…and ${200 - dFlood.shown} more updates`), descs(dFlood).at(-1).slice(-80));
 
-// Post text (escaped when it was extracted) keeps its own formatting; titles can't break the link syntax.
+// Post text (escaped when it was extracted) keeps its own formatting; the title is the embed's own.
 const dEsc = buildDigestMessage([blue(1, postText(`<p>**Not bold** [fake](https://evil.example)</p><ul><li><strong>Bold</strong> and <a href="https://e.com/x">a link</a></li></ul>`), "")].map(r => ({ ...r, title: "Patch [1.2] notes" })));
-assert.equal((dEsc.payload as any).embeds[0].description,
-  "**[Patch 1.2 notes](https://us.forums.blizzard.com/en/wow/t/1/1)**\n\\*\\*Not bold\\*\\* \\[fake\\](<https://evil.example>)\n- **Bold** and [a link](https://e.com/x)", "the excerpt keeps its lines and list");
+assert.equal((dEsc.payload as any).embeds[0].title, `${EMOJI_BLUE_POST} Patch [1.2] notes`);
+assert.equal(descs(dEsc)[0],
+  "\\*\\*Not bold\\*\\* \\[fake\\](<https://evil.example>)\n- **Bold** and [a link](https://e.com/x)", "the excerpt keeps its lines and list");
+// The overflow list's linked titles can't break the link syntax.
+assert.ok(descs(buildDigestMessage([...ten, blue(10, "x")].map(r => ({ ...r, title: "Patch [1.2]\nnotes" }))))[9].startsWith(`${EMOJI_BLUE_POST} **[Patch 1.2 notes](`));
 // The digest query cuts long content (substr, one character more than it keeps): loadRows cuts it
 // again with clipMarkdown, so the line it fell in is plain text.
 const queryCut = "**Whole** line.\nShort **bold that the query cu";
-assert.deepEqual((buildDigestMessage([blue(1, clipMarkdown(queryCut, queryCut.length - 1), "")]).payload as any).embeds[0].description.split("\n").slice(1), ["**Whole** line.", "Short bold that the query …"]);
+assert.deepEqual(descs(buildDigestMessage([blue(1, clipMarkdown(queryCut, queryCut.length - 1), "")]))[0].split("\n"), ["**Whole** line.", "Short bold that the query …"]);
 // The excerpt keeps its structure (11/11's article ran together): headings as bold lines, lists as lists.
 const dLines = buildDigestMessage([news(1, "Intro line.\n## Choose Your Edition\n### Heroic Pack\n- A mount\n  - Needs riding\n- A toy\nOutro.")]);
-assert.equal((dLines.payload as any).embeds[0].description,
-  "**[News 1](https://news.blizzard.com/en-us/article/1)**\n> News TL;DR 1.\nIntro line.\n**Choose Your Edition**\n**Heroic Pack**\n- A mount\n  - Needs riding\n- A toy\nOutro.");
+assert.equal(descs(dLines)[0], "> News TL;DR 1.\nIntro line.\n**Choose Your Edition**\n**Heroic Pack**\n- A mount\n  - Needs riding\n- A toy\nOutro.");
 // A long one is cut at a whole line, and stays within its share once headings are bold.
 const sections = Array.from({ length: 120 }, (_, i) => `## Section ${i}\n- Item ${i} of a long list of upgrades.`).join("\n");
 const dSections = buildDigestMessage([news(1, sections)]);
 fits(dSections.payload);
-assert.match((dSections.payload as any).embeds[0].description, /\n- Item \d+ of a long list of upgrades\. …$/);
-// Only the headings the cut can keep take room: 100 later headings don't push out a short share's excerpt.
+assert.match(descs(dSections)[0], /\n- Item \d+ of a long list of upgrades\. …$/);
+// Only the headings the cut can keep take room: 100 later headings don't push out a short share's
+// excerpt (eight items with long titles and TL;DRs leave the news about 140 characters).
 const manyHeads = `Opening sentence that is worth showing.\n${Array.from({ length: 100 }, (_, i) => `## H${i}\n- Point ${i}.`).join("\n")}`;
-const dHeads = buildDigestMessage([...Array.from({ length: 30 }, (_, i) => blue(400 + i, essay)), news(1, manyHeads)]);
+const wordy = (i: number) => ({ ...blue(400 + i, essay, "A long TL;DR. ".repeat(30)), title: `A long title ${i}. `.repeat(20) });
+const dHeads = buildDigestMessage([...Array.from({ length: 8 }, (_, i) => wordy(i)), news(1, manyHeads)]);
 fits(dHeads.payload);
-assert.ok((dHeads.payload as any).embeds.at(-1).description.includes("Opening sentence that is worth showing."));
+assert.ok(descs(dHeads).at(-1).includes("Opening sentence that is worth showing."));
 // One video in a news article and a forum post (11/12's podcast): one entry, the fuller one, linking the other.
 const pod = "https://youtu.be/a_fLWei5KwE";
 const dPod = buildDigestMessage([{ ...blue(7, `${pod}\nEpisode 7.`, ""), title: "Podcast 7" }, { ...news(7, `${pod}\nJoin the hosts for a lore episode.\nPress play.`), summary: "" }]);
 fits(dPod.payload);
 assert.equal((dPod.payload as any).content, "2 updates today");
-assert.deepEqual((dPod.payload as any).embeds.map((e: any) => e.description),
-  [`**[News 7](https://news.blizzard.com/en-us/article/7)** · [▶ Video](${pod}) · [Forum post](https://us.forums.blizzard.com/en/wow/t/7/1)\nJoin the hosts for a lore episode.\nPress play.`]);
+assert.equal((dPod.payload as any).embeds[0].title, `${EMOJI_NEWS} News 7`);
+assert.deepEqual(descs(dPod), [`[▶ Video](${pod}) · [Forum post](https://us.forums.blizzard.com/en/wow/t/7/1)\nJoin the hosts for a lore episode.\nPress play.`]);
 assert.equal(dPod.shown, 2);
 // Three posts with one video, each fuller than the last: one entry that still links both others.
 const pod3 = buildDigestMessage([{ ...blue(10, `${pod}\nA.`, ""), title: "Pod A" }, { ...blue(11, `${pod}\nBe longer.`, ""), title: "Pod B" }, { ...news(12, `${pod}\nThe longest of the three.`), summary: "" }]);
-assert.deepEqual((pod3.payload as any).embeds.map((e: any) => e.description),
-  [`**[News 12](https://news.blizzard.com/en-us/article/12)** · [▶ Video](${pod}) · [Forum post](https://us.forums.blizzard.com/en/wow/t/11/1) · [Forum post](https://us.forums.blizzard.com/en/wow/t/10/1)\nThe longest of the three.`]);
+assert.deepEqual(descs(pod3), [`[▶ Video](${pod}) · [Forum post](https://us.forums.blizzard.com/en/wow/t/11/1) · [Forum post](https://us.forums.blizzard.com/en/wow/t/10/1)\nThe longest of the three.`]);
 assert.equal(pod3.shown, 3);
-// Titles only (stage 4): a merged entry counts both posts, so "…and N more" stays right.
+// Titles only (stage 3): a merged entry counts both posts, so "…and N more" stays right.
 const podFlood = buildDigestMessage([{ ...blue(300, `${pod}\nX.`), title: "Pod C" }, { ...news(300, `${pod}\nY.`) }, ...flood], { extra: 7 });
 fits(podFlood.payload);
-assert.ok((podFlood.payload as any).embeds.at(-1).description.endsWith(`…and ${202 + 7 - podFlood.shown} more updates`));
-assert.ok((podFlood.payload as any).embeds.some((e: any) => e.description.includes(`[▶ Video](${pod}) · [`)), "the merged entry is listed with both links");
-const podEntries = (podFlood.payload as any).embeds.map((e: any) => e.description.match(/^\*\*\[/gm)?.length ?? 0).reduce((a: number, b: number) => a + b, 0);
+assert.ok(descs(podFlood).at(-1).endsWith(`…and ${202 + 7 - podFlood.shown} more updates`));
+assert.equal(descs(podFlood)[0], `[▶ Video](${pod}) · [Forum post](https://us.forums.blizzard.com/en/wow/t/300/1)`, "the merged entry is shown with both links");
+const podEntries = (podFlood.payload as any).embeds.filter((e: any) => e.title).length + (descs(podFlood).at(-1).match(/^<:\w+:\d+> \*\*\[/gm)?.length ?? 0);
 assert.equal(podFlood.shown, podEntries + 1, "the merged entry counts as its two posts");
 // A heading's own formatting can't meet the added bold: it's plain (escaped) text, links kept as their words.
-const headed = (h: string) => (buildDigestMessage([news(1, `${h}\nBody.`)]).payload as any).embeds[0].description.split("\n")[2];
+const headed = (h: string) => descs(buildDigestMessage([news(1, `${h}\nBody.`)]))[0].split("\n")[1];
 assert.equal(headed("## **Fixes**"), "**Fixes**");
 assert.equal(headed("## See [the notes](https://e.com/x) now"), "**See the notes now**");
 // Code inside a heading: its text, escaped, in the bold line.
@@ -664,59 +706,73 @@ assert.equal(headed("## `x** [fake](https://evil.example)`"), "## `x** [fake](ht
 // Different videos stay apart.
 assert.equal((buildDigestMessage([blue(8, "https://youtu.be/aaaaaaaaaaa\nA."), news(8, "https://youtu.be/bbbbbbbbbbb\nB.")]).payload as any).embeds.length, 2);
 // The alert keeps headings, and a list or quote together.
-assert.equal((buildAlertPayload({ title: "t", url: "https://e/x", content: postText(`<h2>Fixes</h2><ul><li>One</li><li>Two</li></ul><blockquote><p>A</p><p>B</p></blockquote><p>End.</p>`), summary: "" }, {}) as any).embeds[0].description,
-  "## Fixes\n\n- One\n- Two\n\n> A\n> B\n\nEnd.");
-// A post's video is linked on its title line, so it survives even a titles-only digest.
+assert.equal((buildAlertPayload({ source: "Blue Post (US)", title: "t", url: "https://e/x", content: postText(`<h2>Fixes</h2><ul><li>One</li><li>Two</li></ul><blockquote><p>A</p><p>B</p></blockquote><p>End.</p>`), summary: "" }, {}) as any).embeds[0].description,
+  "## Fixes\n- One\n- Two\n\n> A\n> B\n\nEnd.");
+// A post's video leads its text, so it survives even a titles-only digest.
 const dVideo = buildDigestMessage([news(1, "https://youtu.be/mFOkBPMKJhc\nWitness the creation of a legendary.")]);
-assert.equal((dVideo.payload as any).embeds[0].description,
-  "**[News 1](https://news.blizzard.com/en-us/article/1)** · [▶ Video](https://youtu.be/mFOkBPMKJhc)\n> News TL;DR 1.\nWitness the creation of a legendary.");
+assert.equal(descs(dVideo)[0], "[▶ Video](https://youtu.be/mFOkBPMKJhc)\n> News TL;DR 1.\nWitness the creation of a legendary.");
 // An edit that only added a video: its title and the video, nothing else.
 const dVideoEdit = buildDigestMessage([{ ...news(2, `${UPDATE_MARKER}\n[NEW] https://youtu.be/mFOkBPMKJhc\nOld body line.`), title: "News 2 (updated)", summary: "" }]);
-assert.equal((dVideoEdit.payload as any).embeds[0].description, "**[News 2 (updated)](https://news.blizzard.com/en-us/article/2)** · [▶ Video](https://youtu.be/mFOkBPMKJhc)");
+assert.deepEqual([(dVideoEdit.payload as any).embeds[0].title, descs(dVideoEdit)[0]], [`${EMOJI_NEWS} News 2 (updated)`, "[▶ Video](https://youtu.be/mFOkBPMKJhc)"]);
 // Items the digest wasn't handed (a day with more than DIGEST_MAX_ITEMS) are counted, in the same one message.
 const dExtra = buildDigestMessage([blue(1, "Short."), news(1, "Short.")], { extra: 600 });
 fits(dExtra.payload);
 assert.equal((dExtra.payload as any).content, "602 updates today");
-assert.ok((dExtra.payload as any).embeds.at(-1).description.endsWith("…and 600 more updates"));
+assert.ok(descs(dExtra).at(-1).endsWith("…and 600 more updates"));
 assert.equal(dExtra.shown, 2);
 const dFloodExtra = buildDigestMessage(flood, { extra: 50 });
 fits(dFloodExtra.payload);
-assert.ok((dFloodExtra.payload as any).embeds.at(-1).description.endsWith(`…and ${200 - dFloodExtra.shown + 50} more updates`));
-// A title with a line break can't break its link.
-assert.ok((buildDigestMessage([blue(1, "x", "")].map(r => ({ ...r, title: "Two\nlines" }))).payload as any).embeds[0].description.startsWith("**[Two lines]("));
-// Titles-only overflow: a full blue box doesn't stop news from filling the gold one.
-const manyBlue = [...Array.from({ length: 80 }, (_, i) => blue(i, essay, "A TL;DR long enough to push this day past the titles-and-TL;DR stage.")), ...Array.from({ length: 5 }, (_, i) => news(100 + i, essay))];
-const dMany = buildDigestMessage(manyBlue);
-fits(dMany.payload);
-const goldBox = (dMany.payload as any).embeds.find((e: any) => e.color === DIGEST_NEWS_COLOR);
-assert.ok(goldBox && goldBox.description.includes("[News 104]"), "news is still listed when the Blue Post box is full");
-ok("buildDigestMessage: one message, blue/gold embeds, linked titles, TL;DR + post sized to fit");
+assert.ok(descs(dFloodExtra).at(-1).endsWith(`…and ${200 - dFloodExtra.shown + 50} more updates`));
+// A title with a line break is one line.
+assert.equal((buildDigestMessage([blue(1, "x", "")].map(r => ({ ...r, title: "Two\nlines" }))).payload as any).embeds[0].title, `${EMOJI_BLUE_POST} Two lines`);
+ok("buildDigestMessage: one message, an embed per item (9 + a list past 10), TL;DR + post sized to fit");
 
 // Threads: one item per forum topic (slug ignored, US and EU apart); news by article URL.
 assert.equal(threadKey("https://us.forums.blizzard.com/en/wow/t/pvp-faction-balance/2408781/158"), "https://us.forums.blizzard.com/t/2408781");
 assert.equal(threadKey("https://us.forums.blizzard.com/en/wow/t/renamed-slug/2408781/1"), "https://us.forums.blizzard.com/t/2408781");
 assert.notEqual(threadKey("https://eu.forums.blizzard.com/en/wow/t/x/2408781/1"), threadKey("https://us.forums.blizzard.com/en/wow/t/x/2408781/1"));
-assert.equal(threadKey("https://news.blizzard.com/en-us/article/1/x"), "https://news.blizzard.com/en-us/article/1/x");
+assert.equal(threadKey("https://us.forums.blizzard.com/en/wow/t/2408781/158"), "https://us.forums.blizzard.com/t/2408781", "a link without the slug");
+assert.equal(threadKey("https://news.blizzard.com/en-us/article/1/x"), "https://news.blizzard.com/en-us/article/1");
 const reply = (n: number, summary: string, extra: object = {}) => ({ ...blue(5, "Reply body. More text.", summary), id: `r${n}`, title: "Thread 900", url: `https://us.forums.blizzard.com/en/wow/t/t/900/${n}`, ...extra });
 const threadRows = [reply(1, "First."), blue(6, "Other topic."), reply(9, "", { title: "Thread 900 (edited)", content: `${UPDATE_MARKER}\n[NEW] Added line.` })];
-const otherItem = "\n\n**[Blue post 6](https://us.forums.blizzard.com/en/wow/t/6/1)**\n> TL;DR 6.\nOther topic.";
 // The thread's one TL;DR (escaped, one line), then a link to each post.
 const dThread = buildDigestMessage(threadRows, { threadTldr: new Map([[threadKey(threadRows[0].url), "Both *posts*\nsummed up. Second sentence."]]) });
 fits(dThread.payload);
 assert.equal((dThread.payload as any).content, "3 updates today", "every post still counts");
-assert.equal((dThread.payload as any).embeds[0].description,
-  "**[Thread 900](https://us.forums.blizzard.com/en/wow/t/900/1)** · 2 posts\n> Both \\*posts\\* summed up. Second sentence.\n[#1](https://us.forums.blizzard.com/en/wow/t/900/1) · [#9 (edited)](https://us.forums.blizzard.com/en/wow/t/900/9)" +
-  otherItem, "the thread sits where its first post was");
+assert.deepEqual((dThread.payload as any).embeds.map((e: any) => [e.title, e.url]), [
+  [`${EMOJI_BLUE_POST} Thread 900 · 2 posts`, "https://us.forums.blizzard.com/en/wow/t/900/1"],
+  [`${EMOJI_BLUE_POST} Blue post 6`, "https://us.forums.blizzard.com/en/wow/t/6/1"]
+], "the thread sits where its first post was");
+assert.deepEqual(descs(dThread), [
+  "> Both \\*posts\\* summed up. Second sentence.\n[#1](https://us.forums.blizzard.com/en/wow/t/900/1) · [#9 (edited)](https://us.forums.blizzard.com/en/wow/t/900/9)",
+  "> TL;DR 6.\nOther topic."
+]);
 assert.equal(dThread.shown, 3);
 // No thread TL;DR (the model failed): a line per post, its TL;DR or else its start.
-assert.equal((buildDigestMessage(threadRows).payload as any).embeds[0].description,
-  "**[Thread 900](https://us.forums.blizzard.com/en/wow/t/900/1)** · 2 posts\n> [#1](https://us.forums.blizzard.com/en/wow/t/900/1) First.\n> [#9 (edited)](https://us.forums.blizzard.com/en/wow/t/900/9) Added line." + otherItem);
-// Titles only (stage 4): a shown thread counts all its posts, so "…and N more" stays right.
+assert.equal(descs(buildDigestMessage(threadRows))[0],
+  "> [#1](https://us.forums.blizzard.com/en/wow/t/900/1) First.\n> [#9 (edited)](https://us.forums.blizzard.com/en/wow/t/900/9) Added line.");
+// Titles only (stage 3): a shown thread counts all its posts, so "…and N more" stays right.
 const threadFlood = [...Array.from({ length: 5 }, (_, i) => reply(i + 1, "x")), ...flood];
 const dThreadFlood = buildDigestMessage(threadFlood);
 fits(dThreadFlood.payload);
-assert.ok((dThreadFlood.payload as any).embeds.at(-1).description.endsWith(`…and ${threadFlood.length - dThreadFlood.shown} more updates`));
-assert.ok(dThreadFlood.shown >= 5 && (dThreadFlood.payload as any).embeds[0].description.startsWith("**[Thread 900](https://us.forums.blizzard.com/en/wow/t/900/1)** · 5 posts"));
+assert.ok(descs(dThreadFlood).at(-1).endsWith(`…and ${threadFlood.length - dThreadFlood.shown} more updates`));
+assert.ok(dThreadFlood.shown >= 5 && (dThreadFlood.payload as any).embeds[0].title === `${EMOJI_BLUE_POST} Thread 900 · 5 posts`);
+// A thread whose per-post lines alone are more than an embed holds: the stage without TL;DRs, still valid.
+const longThread = buildDigestMessage(Array.from({ length: 17 }, (_, i) => reply(i + 1, "word ".repeat(40))));
+fits(longThread.payload);
+assert.deepEqual([(longThread.payload as any).embeds.length, longThread.shown], [1, 17]);
+// Ninety copies of one video (their links alone overflow an embed) beside a long article: still within limits.
+const copies = buildDigestMessage([...Array.from({ length: 90 }, (_, i) => blue(600 + i, `${pod}\nX.`)), news(999, essay)]);
+fits(copies.payload);
+assert.ok(descs(copies).at(-1).endsWith(`…and ${91 - copies.shown} more updates`));
+// A renamed article (same id, new slug): one item for both versions, never two embeds with one URL.
+const renamed = buildDigestMessage([news(5, "First."), { ...news(5, "Second."), id: "n5b", url: "https://news.blizzard.com/en-us/article/5/new-slug" }]);
+assert.deepEqual((renamed.payload as any).embeds.map((e: any) => [e.title, e.url]), [[`${EMOJI_NEWS} News 5 · 2 versions`, "https://news.blizzard.com/en-us/article/5"]]);
+assert.equal(renamed.shown, 2);
+// The same forum post linked with and without its slug: one thread, one embed.
+const slugless = buildDigestMessage([reply(1, "With slug."), { ...reply(1, "Without slug."), id: "r1b", url: "https://us.forums.blizzard.com/en/wow/t/900/1" }]);
+fits(slugless.payload);
+assert.deepEqual([(slugless.payload as any).embeds.length, slugless.shown], [1, 2]);
 ok("buildDigestMessage: a thread's posts are one item");
 
 // Fingerprints: US/EU crosspost of a new post matches; a different reply doesn't
@@ -983,7 +1039,7 @@ ok("geminiModels: the configured order, each model with its own settings");
 
 // Other servers' channels: each gets the alert with its own role, and nothing else can be mentioned.
 {
-  const base = buildAlertPayload({ title: "Queues", url: "https://e/x", content: "Login queues are long.", summary: "" }, {});
+  const base = buildAlertPayload({ source: "Blue Post (US)", title: "Queues", url: "https://e/x", content: "Login queues are long.", summary: "" }, {});
   const pinged = withRole(base, "223456789012345678") as any;
   assert.equal(pinged.content, "<@&223456789012345678>");
   assert.deepEqual(pinged.allowed_mentions, { parse: [], roles: ["223456789012345678"] });
