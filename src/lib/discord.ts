@@ -48,11 +48,31 @@ export const ALERT_COLOR = 0xdc2626;
 export const DIGEST_BLUE_POST_COLOR = 0x00aeff;
 export const DIGEST_NEWS_COLOR = 0xf8b700;
 
-// The ForeverUpdates app's own emojis (Developer Portal → the app → Emojis).
-export const EMOJI_ALERT = "<:alert:1572629828732198912>";
-export const EMOJI_BLUE_POST = "<:blizz:1569540602910220369>";
-export const EMOJI_NEWS = "<:news:1572629866497581127>";
-const sourceEmoji = (news: boolean) => (news ? EMOJI_NEWS : EMOJI_BLUE_POST);
+// The ForeverUpdates app's emojis (Developer Portal → the app → Emojis), shown as embed author icons:
+// a webhook can't use an app's emojis in text (Discord shows them as ":name:").
+const emojiUrl = (id: string) => `https://cdn.discordapp.com/emojis/${id}.png`;
+export const ICON_ALERT = emojiUrl("1572629828732198912");
+export const ICON_BLUE_POST = emojiUrl("1569540602910220369");
+export const ICON_NEWS = emojiUrl("1572629866497581127");
+const sourceName = (news: boolean) => (news ? "Blizzard News" : "Blue Post");
+
+/** A short line that is all bold and isn't a sentence: a section title, as Blizzard writes them. */
+function sectionTitle(line: string): string | null {
+  const m = line.match(/^\*\*([^*]{1,80})\*\*$/);
+  return m && !/[.!?]$/.test(m[1]) ? m[1] : null;
+}
+
+/**
+ * Post lines (markdown, escaped when extracted) as paragraphs: a blank line between paragraphs, as on
+ * the forum, but a list or quote stays together, and a heading or section title sits right on its text.
+ * `aboveHeading` goes between a heading and the text before it: "\n" where it is a real heading (Discord
+ * spaces it), "\n\n" where it will be a bold line.
+ */
+function joinPost(lines: string[], aboveHeading: "\n" | "\n\n"): string {
+  const kind = (l: string) => (/^> /.test(l) ? ">" : /^[ \t]*(?:-|\d+\.) /.test(l) ? "-" : /^#{1,3} /.test(l) || sectionTitle(l) ? "#" : "");
+  const sep = (prev: string, l: string) => (kind(prev) === "#" || (kind(l) && kind(l) !== "#" && kind(l) === kind(prev)) ? "\n" : kind(l) === "#" ? aboveHeading : "\n\n");
+  return lines.map((l, i) => (i ? sep(lines[i - 1], l) : "") + l).join("");
+}
 
 /** Shortens post markdown for display, marking a cut with " …": see cutMarkdown (whole lines first). */
 export function cutAtSentence(text: string, max: number): { text: string; cut: boolean } {
@@ -140,23 +160,23 @@ export function buildAlertPayload(
 ): Record<string, unknown> {
   // A Discord quote ends at a line break, so the TL;DR is kept to one line.
   const summary = item.summary?.replace(/\s+/g, " ").trim();
-  const tldr = summary ? `> **TL;DR:** ${escapeMarkdown(summary)}\n\n` : "";
+  const tldr = summary ? `> **TL;DR:** ${escapeMarkdown(summary)}` : "";
   const { video, text } = splitVideo(item.content);
-  const watch = video ? `▶ [Watch on YouTube](${video})\n\n` : "";
-  // Each line of post text (markdown, escaped when it was extracted) is a paragraph, heading, list
-  // item or quote line: a blank line between paragraphs, as on the forum, but a list or quote stays together.
-  // A short line that is all bold and isn't a sentence is a section title (how Blizzard writes them):
-  // a heading, with no blank line around it.
-  const lines = postLines(text, item.title).map(l => l.replace(/^\*\*([^*]{1,80})\*\*$/, (line, t: string) => (/[.!?]$/.test(t) ? line : `### ${t}`)));
-  const kind = (l: string) => (/^> /.test(l) ? ">" : /^[ \t]*(?:-|\d+\.) /.test(l) ? "-" : /^#{1,3} /.test(l) ? "#" : "");
-  const sep = (prev: string, l: string) => (kind(l) === "#" || kind(prev) === "#" || (kind(l) && kind(l) === kind(prev)) ? "\n" : "\n\n");
-  const post = cutAtSentence(lines.map((l, i) => (i ? sep(lines[i - 1], l) : "") + l).join(""), ALERT_POST_CHARS);
+  const watch = video ? `▶ [Watch on YouTube](${video})` : "";
+  // In an alert a section title is a heading.
+  const lines = postLines(text, item.title).map(l => { const t = sectionTitle(l); return t ? `### ${t}` : l; });
+  const post = cutAtSentence(joinPost(lines, "\n"), ALERT_POST_CHARS);
+  // A blank line between the TL;DR, the video and the post, except above a heading (Discord spaces it).
+  const body = [tldr, watch, post.text].filter(Boolean).map((p, i) => (i ? (/^#{1,3} /.test(p) ? "\n" : "\n\n") : "") + p).join("");
   // The title already links to the post; an absurdly long URL just isn't repeated.
   const more = post.cut && item.url.length <= 400 ? `\n[Read the full post](${linkUrl(item.url)})` : "";
-  const description = clip(`${tldr}${watch}${post.text}${more}`.trim(), EMBED_DESCRIPTION_LIMIT);
+  const description = clip(`${body}${more}`.trim(), EMBED_DESCRIPTION_LIMIT);
   // Only the configured role can be mentioned (see withRole).
   return withRole({
-    embeds: [{ title: clip(`${EMOJI_ALERT}${sourceEmoji(item.source === "Blizzard News")} ${item.title}`, 256), url: item.url, description: description || escapeMarkdown(clip(item.title, 256)), color: ALERT_COLOR }]
+    embeds: [{
+      author: { name: `Urgent · ${sourceName(item.source === "Blizzard News")}`, icon_url: ICON_ALERT },
+      title: clip(item.title, 256), url: item.url, description: description || escapeMarkdown(clip(item.title, 256)), color: ALERT_COLOR
+    }]
   }, opts.roleId);
 }
 
@@ -178,7 +198,7 @@ function shareBudget(needs: number[], budget: number): number[] {
 
 /**
  * The daily digest as ONE message: "N updates today", then one embed per item, oldest first: its
- * source's emoji and linked title, colored Blizzard blue for a Blue Post and gold for news, then
+ * source (icon and name) and linked title, colored Blizzard blue for a Blue Post and gold for news, then
  * Gemini's TL;DR and as much of the post as fits. Discord allows 10 embeds a message: on a day with
  * more items, the first 9 get their own embed and a 10th lists the rest as linked titles. The
  * 6000-character budget is shared so short posts appear in full and long ones are cut at a sentence
@@ -201,9 +221,9 @@ export function buildDigestMessage(rows: DigestRow[], opts: { extra?: number; th
     if (posts.length === 1) {
       const { video, text } = splitVideo(r.content);
       return {
-        news, n: 1, video, url, title: r.title, also: [] as string[],
+        news, n: 1, video, url, title: r.title, suffix: "", also: [] as string[],
         tldr: r.summary?.trim() ? `> ${escapeMarkdown(clip(oneLine(r.summary), 300))}` : "", // a one-line quote box
-        body: postLines(text, r.title).join("\n") // its own lines, headings and lists kept, for its excerpt
+        body: joinPost(postLines(text, r.title), "\n\n") // its own paragraphs, headings and lists, for its excerpt
       };
     }
     // A thread: its title once, then its one TL;DR for all the posts and a link to each; without that
@@ -221,7 +241,7 @@ export function buildDigestMessage(rows: DigestRow[], opts: { extra?: number; th
     const summary = opts.threadTldr?.get(key)?.trim();
     return {
       news, n: posts.length, video: undefined as string | undefined, url, also: [] as string[],
-      title: `${r.title.replace(/ \((?:edited|updated)\)$/, "")} · ${posts.length} ${news ? "versions" : "posts"}`,
+      title: r.title.replace(/ \((?:edited|updated)\)$/, ""), suffix: ` · ${posts.length} ${news ? "versions" : "posts"}`,
       tldr: summary ? `> ${escapeMarkdown(clip(oneLine(summary), 300))}\n${posts.map(link).join(" · ")}` : posts.map(line).join("\n"),
       body: ""
     };
@@ -242,14 +262,16 @@ export function buildDigestMessage(rows: DigestRow[], opts: { extra?: number; th
     byVideo.set(it.video, keep);
   });
   const items = found.filter((_, i) => !merged.has(i)).map(it => {
-    const emoji = sourceEmoji(it.news);
     // The video and the other posts' links: an embed title can't hold links, so they lead the text.
     const links = [it.video ? `[▶ Video](${it.video})` : "", ...it.also].filter(Boolean).join(" · ");
+    // Posts merged by their video say how many they are, like a thread. A long title is cut, never the count.
+    const suffix = it.suffix || (it.also.length ? ` · ${it.n} posts` : "");
     return {
       ...it, links,
-      title: clip(`${emoji} ${oneLine(it.title)}`, 256),
+      author: { name: sourceName(it.news), icon_url: it.news ? ICON_NEWS : ICON_BLUE_POST },
+      title: clip(oneLine(it.title), 256 - suffix.length) + suffix,
       // The item as one line of the overflow list.
-      head: `${emoji} **[${linkText(it.title)}](${linkUrl(it.url)})**${links ? ` · ${links}` : ""}`
+      head: `**[${linkText(it.title)}${suffix}](${linkUrl(it.url)})** · ${sourceName(it.news)}${links ? ` · ${links}` : ""}`
     };
   });
   const boxes = items.length <= EMBEDS_PER_MESSAGE ? items.length : EMBEDS_PER_MESSAGE - 1;
@@ -259,8 +281,8 @@ export function buildDigestMessage(rows: DigestRow[], opts: { extra?: number; th
 
   // The first `shownBoxes` items as embeds (descs: their text), then the overflow list.
   const render = (descs: string[], shownBoxes: number, listed: string[], more: number) => {
-    const embeds: { title?: string; url?: string; description?: string; color: number }[] = items.slice(0, shownBoxes).map((it, i) => ({
-      title: it.title, url: it.url, ...(descs[i] ? { description: descs[i] } : {}),
+    const embeds: { author?: { name: string; icon_url: string }; title?: string; url?: string; description?: string; color: number }[] = items.slice(0, shownBoxes).map((it, i) => ({
+      author: it.author, title: it.title, url: it.url, ...(descs[i] ? { description: descs[i] } : {}),
       color: it.news ? DIGEST_NEWS_COLOR : DIGEST_BLUE_POST_COLOR
     }));
     if (listed.length) embeds.push({ description: listed.join("\n"), color: DIGEST_BLUE_POST_COLOR });
@@ -281,7 +303,7 @@ export function buildDigestMessage(rows: DigestRow[], opts: { extra?: number; th
   for (const withTldr of [true, false]) {
     const lead = (it: (typeof items)[number]) => [it.links, withTldr ? it.tldr : ""].filter(Boolean);
     const fixedDesc = boxed.map(it => lead(it).reduce((n, p) => n + p.length + 1, 0));
-    const total = boxed.reduce((n, it, i) => n + it.title.length + fixedDesc[i], 0) + listCost;
+    const total = boxed.reduce((n, it, i) => n + it.author.name.length + it.title.length + fixedDesc[i], 0) + listCost;
     // Every embed's own text must fit too (a thread of many posts lists a line for each).
     if (total > budget || listCost + tail > EMBED_DESCRIPTION_LIMIT || fixedDesc.some(f => f + tail > EMBED_DESCRIPTION_LIMIT)) continue;
 
@@ -314,7 +336,7 @@ export function buildDigestMessage(rows: DigestRow[], opts: { extra?: number; th
   let used = 0, listUsed = 0, shown = 0, shownBoxes = 0;
   for (const [i, it] of items.entries()) {
     const inBox = i < boxes;
-    const cost = inBox ? it.title.length + it.links.length + 1 : it.head.length + 1;
+    const cost = inBox ? it.author.name.length + it.title.length + it.links.length + 1 : it.head.length + 1;
     if (used + cost + fullTail > DIGEST_BUDGET || (inBox ? it.links.length : listUsed + cost) + fullTail > EMBED_DESCRIPTION_LIMIT) break;
     if (inBox) { descs.push(it.links); shownBoxes++; } else { heads.push(it.head); listUsed += cost; }
     used += cost;
@@ -328,7 +350,7 @@ function digestPayload(count: number, embeds: Record<string, unknown>[]): Record
 }
 
 export function embedTextLength(embed: any): number {
-  let n = (embed.title ?? "").length + (embed.description ?? "").length + (embed.footer?.text ?? "").length;
+  let n = (embed.author?.name ?? "").length + (embed.title ?? "").length + (embed.description ?? "").length + (embed.footer?.text ?? "").length;
   for (const f of embed.fields ?? []) n += (f.name ?? "").length + (f.value ?? "").length;
   return n;
 }
@@ -352,7 +374,7 @@ export function welcomePayload(nextDigest: number): Record<string, unknown> {
 export function testAlertPayload(): Record<string, unknown> {
   return {
     content: "Test alert from ForeverUpdates.",
-    embeds: [{ title: `${EMOJI_ALERT} Test alert`, description: "This is only a test: urgent WoW: Forever alerts will be posted here like this, pinging the role set on the settings page.", color: ALERT_COLOR }]
+    embeds: [{ author: { name: "Urgent", icon_url: ICON_ALERT }, title: "Test alert", description: "This is only a test: urgent WoW: Forever alerts will be posted here like this, pinging the role set on the settings page.", color: ALERT_COLOR }]
   };
 }
 

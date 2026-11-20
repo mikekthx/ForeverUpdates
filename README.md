@@ -60,7 +60,7 @@ You need Node 20 or later, a Cloudflare account (the free plan is fine), a [Gemi
 
 5. **Point the links at your own fork.** Edit `USER_AGENT` in `src/config.ts`, so Blizzard can tell whose bot it is, and `REPO_URL` in `src/lib/pages.ts` (the "Source code" link on the public page).
 
-6. **Upload the emojis.** Alerts and the digest use three custom emojis, in `assets/emojis/`. Upload them to your Discord application (Developer Portal → your app → **Emojis**) as `alert`, `blizz` and `news`. Then copy each one's `<:name:id>` into `EMOJI_ALERT`, `EMOJI_BLUE_POST` and `EMOJI_NEWS` in `src/lib/discord.ts`. If you skip this step, the emojis show as plain text.
+6. **Optional: use your own icons.** Each alert and digest box shows a small icon above its title. The icons are the images in `assets/emojis/`, loaded from Discord's CDN by emoji ID, so they work as they are. To host them yourself, upload the images to your Discord application (Developer Portal → your app → **Emojis**). Then put their IDs in `ICON_ALERT`, `ICON_BLUE_POST` and `ICON_NEWS` in `src/lib/discord.ts`. They can't be inline emojis: webhooks can't use an app's emojis in text.
 
 7. **Deploy.**
 

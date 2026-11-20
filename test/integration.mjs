@@ -269,7 +269,7 @@ async function settle({ retries = true, maxRounds = 30, classify: runClassify = 
 }
 const events = async (where = "1=1") => (await db.prepare(`SELECT * FROM events WHERE ${where} ORDER BY created_at, id`).all()).results;
 const doc = async key => db.prepare("SELECT * FROM documents WHERE key = ?").bind(key).first();
-const alerts = () => world.discord.filter(m => m.embeds?.[0]?.title?.startsWith("<:alert:"));
+const alerts = () => world.discord.filter(m => m.embeds?.[0]?.author?.name?.startsWith("Urgent · "));
 const makeDue = (where = "watch_tier > 0") => db.prepare(`UPDATE documents SET checked_at = datetime('now', '-3 hours') WHERE ${where}`).run();
 let passed = 0; const ok = s => { passed++; console.log("  ✓", s); };
 
@@ -869,9 +869,9 @@ try {
   assert.deepEqual(dm.allowed_mentions, { parse: [] });
   // 57 items: nine embeds (Blue Posts blue, news gold), then the rest as a list of linked titles.
   assert.equal(dm.embeds.length, 10);
-  assert.ok(dm.embeds.slice(0, 9).every(e => e.title?.startsWith("<:") && [0x00aeff, 0xf8b700].includes(e.color)) && !dm.embeds[9].title);
-  assert.ok(dm.embeds.reduce((n, e) => n + (e.title ?? "").length + (e.description ?? "").length, 0) <= 6000 && dm.embeds.every(e => (e.description ?? "").length <= 4096 && !e.footer && !e.fields));
-  assert.ok(dm.embeds[9].description.includes("<:blizz:1569540602910220369> **[Bulk item 1](https://us.forums.blizzard.com/en/wow/t/1/1)**"));
+  assert.ok(dm.embeds.slice(0, 9).every(e => e.title && e.author?.icon_url?.startsWith("https://cdn.discordapp.com/emojis/") && [0x00aeff, 0xf8b700].includes(e.color)) && !dm.embeds[9].title);
+  assert.ok(dm.embeds.reduce((n, e) => n + (e.author?.name ?? "").length + (e.title ?? "").length + (e.description ?? "").length, 0) <= 6000 && dm.embeds.every(e => (e.description ?? "").length <= 4096 && !e.footer && !e.fields));
+  assert.ok(dm.embeds[9].description.includes("**[Bulk item 1](https://us.forums.blizzard.com/en/wow/t/1/1)** · Blue Post"));
   assert.equal((await events("digest_state = 'queued'")).length, 0, "every queued item went into the one message");
   d0 = world.discord.length;
   await poll(pt("17:10")); await settle();
@@ -1064,7 +1064,7 @@ try {
   assert.equal(world.discord.length, d0 + 1);
   const grouped = world.discord.at(-1);
   assert.equal(grouped.content, "3 updates today", "the lone alert stays out");
-  assert.equal(grouped.embeds[0].title, "<:blizz:1569540602910220369> Faction Balance · 3 posts");
+  assert.equal(grouped.embeds[0].title, "Faction Balance · 3 posts");
   assert.equal(grouped.embeds[0].description,
     "> Faction Balance: 3 posts summed up.\n" +
     "[#1](https://us.forums.blizzard.com/en/wow/t/9001/1) · [#158](https://us.forums.blizzard.com/en/wow/t/9001/158) · [#174](https://us.forums.blizzard.com/en/wow/t/9001/174)",
