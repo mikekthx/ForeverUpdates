@@ -3,11 +3,12 @@
  * fallback), stores the results, promotes relevant articles to the watch list, and sends alerts.
  */
 
-import { CLASSIFY_MAX_ATTEMPTS, GEMINI_WAIT_MIN, OPERATIONAL_TITLE, WATCH_TIERS } from "./config";
+import { CLASSIFY_MAX_ATTEMPTS, GEMINI_WAIT_MIN, OPERATIONAL_TITLE, THREAD_CONTEXT_CHARS, THREAD_CONTEXT_POSTS, WATCH_TIERS } from "./config";
 import { bumpCounter, placeholders, sqlTime } from "./db";
 import { broadcastStmts, startFanout } from "./fanout";
 import { Classification, heuristicClassify } from "./lib/classify";
-import { buildAlertPayload } from "./lib/discord";
+import { buildAlertPayload, threadKey } from "./lib/discord";
+import { clipMarkdown } from "./lib/markdown";
 import { classifyItems } from "./llm/chain";
 import type { PromptItem } from "./llm/prompt";
 import type { ClassifyMessage, Env, EventRow } from "./types";
@@ -23,9 +24,10 @@ export async function handleClassifyBatch(batch: MessageBatch<ClassifyMessage>, 
   ).bind(...ids).all<EventRow & { created_at: string }>();
   const rows = results ?? [];
 
+  const context = await threadContext(db, rows);
   const items: PromptItem[] = rows.map(r => ({
     source: r.source, author: r.author, title: r.title, content: r.content,
-    forumVerified: !!r.forum_verified, postedAt: null
+    forumVerified: !!r.forum_verified, postedAt: null, context: context.get(r.id)
   }));
   // How long each item may wait for Gemini: an urgent-looking Blue Post doesn't (it alerts at once,
   // like on keywords when no model is up). created_at is SQLite UTC ("YYYY-MM-DD HH:MM:SS"); one in
@@ -146,4 +148,37 @@ export async function handleClassifyBatch(batch: MessageBatch<ClassifyMessage>, 
     else if (waitingSet.has(m.body.id)) m.retry({ delaySeconds: chain.retryAfterSec });
     else m.ack();
   }
+}
+
+/**
+ * Each forum post's earlier Blue Posts in its thread (new posts from the last week, oldest first,
+ * no crosspost copies), so a reply like "Confirming the change was made yesterday" gets a TL;DR that
+ * says which change. Optional: without it (a D1 error), items are classified on their own.
+ */
+async function threadContext(db: D1Database, rows: (EventRow & { created_at: string })[]): Promise<Map<string, string[]>> {
+  const out = new Map<string, string[]>();
+  // threadKey is "<forum host>/t/<topic>"; the topic's posts, with or without a slug, are under it.
+  const patterns = [...new Set(rows.map(r => threadKey(r.url).match(/^(https:\/\/[^/]+)\/t\/(\d+)$/)).filter(m => m).map(m => `${m![1]}/%/${m![2]}/%`))];
+  if (!patterns.length) return out;
+  try {
+    const { results } = await db.prepare(
+      `SELECT doc_key, url, substr(content, 1, ?) AS content FROM events
+       WHERE kind = 'new' AND state != 'duplicate' AND created_at > datetime('now', '-7 days')
+         AND (${patterns.map(() => "url LIKE ?").join(" OR ")})
+       ORDER BY created_at DESC, id DESC LIMIT 100`
+    ).bind(THREAD_CONTEXT_CHARS + 1, ...patterns).all<{ doc_key: string; url: string; content: string }>();
+    // One per post, the newest (a recovered full text, "@full", over its teaser), in forum order
+    // (post numbers), not the order they were fetched in.
+    const postNumber = (url: string) => Number(url.match(/\/(\d+)$/)?.[1] ?? 0);
+    const seen = new Set<string>();
+    const posts = (results ?? []).filter(p => !seen.has(p.doc_key) && !!seen.add(p.doc_key)).sort((a, b) => postNumber(a.url) - postNumber(b.url));
+    for (const r of rows) {
+      const key = threadKey(r.url);
+      const earlier = posts.filter(p => p.doc_key !== r.doc_key && threadKey(p.url) === key && postNumber(p.url) < postNumber(r.url));
+      if (earlier.length) out.set(r.id, earlier.slice(-THREAD_CONTEXT_POSTS).map(p => clipMarkdown(p.content, THREAD_CONTEXT_CHARS)));
+    }
+  } catch (err) {
+    console.warn("Thread context not loaded; classifying without it:", err);
+  }
+  return out;
 }

@@ -2,7 +2,7 @@
 
 import { UPDATE_MARKER, updateFocus } from "./diff";
 import { cutMarkdown, escapeMarkdown, inlineMarkdown, linkUrl, stripMarkdown } from "./markdown";
-import { clip, splitVideoLine } from "./text";
+import { clip, localTimes, splitVideoLine, timeTags } from "./text";
 
 export interface DigestRow {
   id: string;
@@ -156,12 +156,13 @@ export const webhookUrl = (id: string, token: string) => `https://discord.com/ap
 
 export function buildAlertPayload(
   item: { source: string; title: string; url: string; content: string; summary: string },
-  opts: { roleId?: string }
+  opts: { roleId?: string; now?: Date }
 ): Record<string, unknown> {
+  const now = opts.now ?? new Date();
   // A Discord quote ends at a line break, so the TL;DR is kept to one line.
-  const summary = item.summary?.replace(/\s+/g, " ").trim();
+  const summary = localTimes(item.summary ?? "", now).replace(/\s+/g, " ").trim();
   const tldr = summary ? `> **TL;DR:** ${escapeMarkdown(summary)}` : "";
-  const { video, text } = splitVideo(item.content);
+  const { video, text } = splitVideo(localTimes(item.content ?? "", now));
   const watch = video ? `▶ [Watch on YouTube](${video})` : "";
   // In an alert a section title is a heading.
   const lines = postLines(text, item.title).map(l => { const t = sectionTitle(l); return t ? `### ${t}` : l; });
@@ -170,7 +171,7 @@ export function buildAlertPayload(
   const body = [tldr, watch, post.text].filter(Boolean).map((p, i) => (i ? (/^#{1,3} /.test(p) ? "\n" : "\n\n") : "") + p).join("");
   // The title already links to the post; an absurdly long URL just isn't repeated.
   const more = post.cut && item.url.length <= 400 ? `\n[Read the full post](${linkUrl(item.url)})` : "";
-  const description = clip(`${body}${more}`.trim(), EMBED_DESCRIPTION_LIMIT);
+  const description = timeTags(clip(`${body}${more}`.trim(), EMBED_DESCRIPTION_LIMIT));
   // Only the configured role can be mentioned (see withRole).
   return withRole({
     embeds: [{
@@ -208,7 +209,9 @@ function shareBudget(needs: number[], budget: number): number[] {
  * `threadTldr`'s one TL;DR for the thread (by threadKey) and a link to each post, or without it a line
  * per post. Two posts with the same video are one item, linking both.
  */
-export function buildDigestMessage(rows: DigestRow[], opts: { extra?: number; threadTldr?: Map<string, string> } = {}): { payload: Record<string, unknown>; shown: number } {
+export function buildDigestMessage(rows: DigestRow[], opts: { extra?: number; threadTldr?: Map<string, string>; now?: Date } = {}): { payload: Record<string, unknown>; shown: number } {
+  const now = opts.now ?? new Date();
+  rows = rows.map(r => ({ ...r, summary: localTimes(r.summary ?? "", now), content: localTimes(r.content ?? "", now) }));
   const extra = Math.max(0, opts.extra ?? 0);
   const count = rows.length + extra;
   const oneLine = (s: string) => s.replace(/\s+/g, " ").trim();
@@ -238,7 +241,7 @@ export function buildDigestMessage(rows: DigestRow[], opts: { extra?: number; th
       const gist = p.summary?.trim() ? escapeMarkdown(clip(oneLine(p.summary), 200)) : cutAtSentence(bodyOf(splitVideo(p.content).text), 200).text.replace(/\n/g, " ");
       return `> ${link(p)} ${gist}`.trimEnd();
     };
-    const summary = opts.threadTldr?.get(key)?.trim();
+    const summary = localTimes(opts.threadTldr?.get(key)?.trim() ?? "", now);
     return {
       news, n: posts.length, video: undefined as string | undefined, url, also: [] as string[],
       title: r.title.replace(/ \((?:edited|updated)\)$/, ""), suffix: ` · ${posts.length} ${news ? "versions" : "posts"}`,
@@ -282,7 +285,7 @@ export function buildDigestMessage(rows: DigestRow[], opts: { extra?: number; th
   // The first `shownBoxes` items as embeds (descs: their text), then the overflow list.
   const render = (descs: string[], shownBoxes: number, listed: string[], more: number) => {
     const embeds: { author?: { name: string; icon_url: string }; title?: string; url?: string; description?: string; color: number }[] = items.slice(0, shownBoxes).map((it, i) => ({
-      author: it.author, title: it.title, url: it.url, ...(descs[i] ? { description: descs[i] } : {}),
+      author: it.author, title: it.title, url: it.url, ...(descs[i] ? { description: timeTags(descs[i]) } : {}),
       color: it.news ? DIGEST_NEWS_COLOR : DIGEST_BLUE_POST_COLOR
     }));
     if (listed.length) embeds.push({ description: listed.join("\n"), color: DIGEST_BLUE_POST_COLOR });

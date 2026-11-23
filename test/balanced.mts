@@ -2,8 +2,8 @@
 // and bare URLs aside, every marker pairs up and every "[" is a whole link).
 export function balanced(line: string): boolean {
   // Read left to right, as stripMarkdown does: an escape, inline code or a URL, whichever comes first.
-  let s = line.replace(/\\[\s\S]|(`+)[\s\S]*?\1|<https?:\/\/[^\s<>]*>|https?:\/\/[\w\-.:/?#@!$&'+,;=%]+/gi, "");
-  if (s.includes("<")) return false; // a <url> a cut left open (a literal "<" is escaped)
+  let s = line.replace(/\\[\s\S]|(`+)[\s\S]*?\1|<https?:\/\/[^\s<>]*>|<t:\d+:[tfF]>|https?:\/\/[\w\-.:/?#@!$&'+,;=%]+/gi, "");
+  if (s.includes("<")) return false; // a <url> a cut left open (a literal "<" is escaped; a timestamp is whole)
   if (s.includes("`")) return false;
   const links = (s.match(/\]\([^)\s]*\)/g) ?? []).length;
   s = s.replace(/\]\([^)\s]*\)/g, "]");

@@ -243,6 +243,80 @@ export function htmlToText(html: string, opts: { dropQuotes?: boolean } = {}): s
     .trim();
 }
 
+// Times as Blizzard writes them ("9:55 a.m. PST", "November 4 at 3 p.m. Pacific", "7–10 a.m. PDT",
+// "15:00 CET"), with an optional date before them. A label naming an offset means exactly that
+// offset (minutes from UTC); PT/Pacific and ET/Eastern follow daylight saving on the date.
+const OFFSETS: Record<string, number> = { PST: -480, PDT: -420, EST: -300, EDT: -240, CET: 60, CEST: 120, UTC: 0, GMT: 0 };
+const ZONES: Record<string, string> = { P: "America/Los_Angeles", E: "America/New_York" };
+const MAX_TIMES = 50; // per text: bounds the CPU a post full of times can cost
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const CLOCK = String.raw`(?<![\w.:])(\d{1,2})(?::([0-5]\d))?(?:\s?([AaPp])\.?\s?[Mm]\b\.?)?`;
+const TIME_RE = new RegExp(
+  String.raw`(?:\b((?:Mon|Tues|Wednes|Thurs|Fri|Satur|Sun)day,? )?(${MONTHS.join("|")})[a-z]*\.? (\d{1,2})(?:st|nd|rd|th)?(?:,? (\d{4}))?,?(?: at| from)? )?` +
+  String.raw`${CLOCK}(?:(\s?(?:[-–—]|to)\s?)${CLOCK})?\s?(PST|PDT|PT|Pacific(?: Time)?|EST|EDT|ET|Eastern(?: Time)?|CEST|CET|UTC|GMT)\b`, "g");
+const zoneClocks = new Map<string, Intl.DateTimeFormat>();
+
+/** What `zone`'s clock reads at `ms`, written as a UTC time. */
+function wallClock(ms: number, zone: string): number {
+  let f = zoneClocks.get(zone);
+  if (!f) zoneClocks.set(zone, f = new Intl.DateTimeFormat("en-US", { timeZone: zone, year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric", hourCycle: "h23" }));
+  const p = Object.fromEntries(f.formatToParts(ms).map(x => [x.type, Number(x.value)]));
+  return Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute);
+}
+
+/**
+ * Each time with a zone, as a Discord timestamp (every reader sees their own time zone): the time
+ * alone (`:t`), or the date and time when a date comes before it. Written as a placeholder of the
+ * same length, which escaping and cutting leave alone; timeTags() turns it into the real tag.
+ * shortcut: a time without a date is placed on `now`'s day, so "yesterday at 9:55 a.m." shows the
+ * right time but the wrong date on hover; read "yesterday"/"tomorrow" if that ever matters. A PT/ET
+ * time skipped by the spring-forward hour comes out an hour early.
+ */
+export function localTimes(text: string, now: Date): string {
+  let count = 0;
+  return text.replace(TIME_RE, (all, weekday, month, day, year, h1, m1, ap1, sep, h2, m2, ap2, tz: string, offset: number) => {
+    if (++count > MAX_TIMES || /\S*$/.exec(text.slice(0, offset))![0].includes("://")) return all; // or inside a URL
+    // "Phase 1 - 3:00 p.m.": a bare number before a spaced dash isn't the start of a range.
+    if (!month && h2 && m1 === undefined && !ap1 && /\s/.test(sep) && sep.trim() !== "to") {
+      const cut = all.lastIndexOf(sep) + sep.length;
+      return all.slice(0, cut) + localTimes(all.slice(cut), now);
+    }
+    const fixed = OFFSETS[tz], zone = ZONES[tz[0]];
+    // Minutes into the day; a time needs minutes or a.m./p.m. ("7–10 a.m.": the first takes the second's).
+    const minutes = (h: string, m: string | undefined, ap: string | undefined) => {
+      const hour = Number(h);
+      if (ap) return hour < 1 || hour > 12 ? NaN : ((hour % 12) + (/p/i.test(ap) ? 12 : 0)) * 60 + Number(m ?? 0);
+      return m === undefined || hour > 23 ? NaN : hour * 60 + Number(m);
+    };
+    const inherited = !!h2 && !ap1 && !!ap2;
+    let start = minutes(h1, m1, inherited ? ap2 : ap1);
+    let end = h2 ? minutes(h2, m2, ap2) : 0;
+    if (Number.isNaN(start) || Number.isNaN(end)) return all;
+    if (inherited && start > end) start += start >= 720 ? -720 : 720; // "11–1 p.m." from 11 a.m.; "11–1 a.m." from 11 p.m.
+    if (h2 && end <= start) end += 1440; // past midnight
+    if (month && (Number(day) < 1 || Number(day) > 31)) return all;
+    const today = fixed !== undefined ? now.getTime() + fixed * 60_000 : wallClock(now.getTime(), zone);
+    const y = new Date(today).getUTCFullYear();
+    // A date without a year is the one nearest today ("January 5" written in December).
+    const midnight = !month ? today - (today % 86_400_000)
+      : year ? Date.UTC(Number(year), MONTHS.indexOf(month), Number(day))
+      : [y - 1, y, y + 1].map(v => Date.UTC(v, MONTHS.indexOf(month), Number(day))).reduce((a, b) => (Math.abs(b - today) < Math.abs(a - today) ? b : a));
+    const tag = (mins: number, style: string) => {
+      const wall = midnight + mins * 60_000;
+      let at = wall - (fixed ?? 0) * 60_000;
+      if (fixed === undefined) for (let i = 0; i < 2; i++) at = wall - (wallClock(at, zone) - at); // the zone's offset on that day
+      return `\u0001t:${Math.floor(at / 1000)}:${style}\u0002`;
+    };
+    const first = tag(start, month ? (weekday ? "F" : "f") : "t");
+    return h2 ? `${first} – ${tag(end, "t")}` : first;
+  });
+}
+
+/** localTimes()'s placeholders as Discord timestamps; one a clip cut in half is dropped. */
+export function timeTags(text: string): string {
+  return text.replace(/\u0001t:(\d+):([tfF])\u0002/g, "<t:$1:$2>").replace(/\u0001[\dt:fF]*|\u0002/g, "");
+}
+
 export function clip(s: string, max: number): string {
   if (s.length <= max) return s;
   let cut = s.slice(0, Math.max(0, max - 1));

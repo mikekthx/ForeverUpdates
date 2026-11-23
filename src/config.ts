@@ -108,6 +108,10 @@ export const DIGEST_TLDR_TIMEOUT_MS = 25_000;
  * tokens per minute); threads past it are shown post by post. */
 export const THREAD_POST_CHARS = 2000;
 export const THREAD_PROMPT_CHARS = 30_000;
+/** A forum reply is classified with the thread's earlier Blue Posts (up to this many, each cut to
+ * this length, from the last week), so its TL;DR can say what it's about. */
+export const THREAD_CONTEXT_POSTS = 3;
+export const THREAD_CONTEXT_CHARS = 1500;
 export const EVENT_RETENTION_DAYS = 45;
 export const DOC_RETENTION_DAYS = 180;
 export const HEALTH_MAX_FAILURES = 12;        // 1 hour of consecutive errors

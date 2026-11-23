@@ -111,8 +111,9 @@ export async function classifyItems(env: Env, items: PromptItem[], waitUntil: nu
   if (env.GEMINI_API_KEY) {
     const take: number[] = [];
     let chars = 0;
+    const size = (it: PromptItem) => it.content.length + (it.context ?? []).reduce((n, p) => n + p.length, 0);
     items.forEach((it, i) => {
-      if (take.length === 0 || chars + it.content.length <= GEMINI_BATCH_CHARS) { take.push(i); chars += it.content.length; }
+      if (take.length === 0 || chars + size(it) <= GEMINI_BATCH_CHARS) { take.push(i); chars += size(it); }
     });
     // Items the last answer left out go to the next model (a partial answer isn't a failure).
     let unanswered = take;
@@ -157,7 +158,8 @@ export async function classifyItems(env: Env, items: PromptItem[], waitUntil: nu
     const model = env.WORKERS_AI_MODEL?.trim() || WORKERS_AI_DEFAULT_MODEL;
     for (const i of left) {
       try {
-        const cls = await classifyWithWorkersAi(env.AI, model, { ...items[i], content: clip(focusEdit(items[i].content, WORKERS_AI_ITEM_CHARS), WORKERS_AI_ITEM_CHARS) });
+        // The excerpt alone: no thread context, so the request stays within WORKERS_AI_ITEM_CHARS.
+        const cls = await classifyWithWorkersAi(env.AI, model, { ...items[i], content: clip(focusEdit(items[i].content, WORKERS_AI_ITEM_CHARS), WORKERS_AI_ITEM_CHARS), context: undefined });
         results.set(i, { cls, by: "workers-ai" });
         await bumpCounter(env.DB, "calls:workers-ai");
       } catch (err) {

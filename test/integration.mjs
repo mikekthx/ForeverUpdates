@@ -330,10 +330,27 @@ try {
   world.articles["2"] = articlePage(["November 4, 2026", "World of Warcraft: Midnight", "Fixed an issue with Delves for Midnight players only."]);
   world.articles["3"] = articlePage(["Watch the new WoW: Forever Skyborne story now, starring Cormack the fallen crusader."]);
 
+  // An earlier Blue Post in the critical post's thread (6001, linked without a slug): its reply is
+  // classified with it as context. A crosspost copy and another topic's post aren't.
+  // That post's teaser (classified first) and its recovered full text are one post: the full one.
+  await db.batch([
+    db.prepare(`INSERT INTO events (id, doc_key, kind, source, title, url, author, content, state, created_at)
+      VALUES ('ctx-0', 'post:us:ctx1', 'new', 'Blue Post (US)', 'Login queues on launch', 'https://us.forums.blizzard.com/en/wow/t/6001/2', 'Kaivax', 'Teaser.', 'done', datetime('now', '-2 hours'))`),
+    db.prepare(`INSERT INTO events (id, doc_key, kind, source, title, url, author, content, state, created_at)
+      VALUES ('ctx-1', 'post:us:ctx1', 'new', 'Blue Post (US)', 'Login queues on launch', 'https://us.forums.blizzard.com/en/wow/t/6001/2', 'Kaivax', 'Earlier: queues are caused by the realm cap.', 'done', datetime('now', '-1 hour'))`),
+    db.prepare(`INSERT INTO events (id, doc_key, kind, source, title, url, author, content, state, created_at)
+      VALUES ('ctx-2', 'post:us:ctx2', 'new', 'Blue Post (US)', 'x', 'https://us.forums.blizzard.com/en/wow/t/x/6001/3', 'Kaivax', 'A crosspost copy.', 'duplicate', datetime('now', '-1 hour'))`),
+    db.prepare(`INSERT INTO events (id, doc_key, kind, source, title, url, author, content, state, created_at)
+      VALUES ('ctx-3', 'post:us:ctx3', 'new', 'Blue Post (US)', 'x', 'https://us.forums.blizzard.com/en/wow/t/x/16001/1', 'Kaivax', 'Another topic.', 'done', datetime('now', '-1 hour'))`)
+  ]);
   await poll();
   s = await settle();
   assert.equal(world.geminiCalls.length, 1, "one batched Gemini call");
   const prompt = world.geminiCalls[0];
+  assert.equal((prompt.match(/<thread_context>/g) ?? []).length, 1, "only the reply gets thread context");
+  assert.ok(prompt.includes("<thread_context>\n<post>\nEarlier: queues are caused by the realm cap.\n</post>\n</thread_context>"));
+  assert.ok(!/A crosspost copy|Another topic/.test(prompt));
+  await db.prepare("DELETE FROM events WHERE id LIKE 'ctx-%'").run();
   assert.ok(prompt.includes("adding capacity"), "full post body sent");
   assert.ok(prompt.includes("Delves for Midnight"), "full article body sent");
   for (const bad of ["Midnight tuning", "Beta wrap-up", "Old news", "transmog", "Zul'Aman"]) assert.ok(!prompt.includes(bad), `${bad} filtered out`);

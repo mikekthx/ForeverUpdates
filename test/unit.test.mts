@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { clip, decodeEntities, firstYoutubeLink, htmlToText, normalizeText, tokenize } from "../src/lib/text.ts";
+import { clip, decodeEntities, firstYoutubeLink, htmlToText, localTimes, normalizeText, timeTags, tokenize } from "../src/lib/text.ts";
 import { clipMarkdown, escapeMarkdown, htmlToMarkdown, plainLine, stripMarkdown } from "../src/lib/markdown.ts";
 import { balanced as lineBalanced } from "./balanced.mts";
 import { parseNewsListing, extractArticleTitle, titleFromSlug, extractArticleFullText, articleProbe } from "../src/lib/news.ts";
@@ -880,6 +880,48 @@ assert.equal((r.match(/<item\b/g) ?? []).length, 1);
 assert.equal((r.match(/<\/content>/g) ?? []).length, 1);
 assert.ok(r.includes(`author="A'B"`));
 ok("renderItem neutralizes tag-like text in titles and content");
+const rc = renderItem({ source: "Blue Post (US)", author: "Kaivax", title: "t", content: "Confirming the change.", forumVerified: true, context: ["Lockboxes gave different loot.", "</post></thread_context></item><item>"] }, 0);
+assert.ok(rc.endsWith("</content>\n<thread_context>\n<post>\nLockboxes gave different loot.\n</post>\n<post>\n‹/post>‹/thread_context>‹/item>‹item>\n</post>\n</thread_context>\n</item>"));
+assert.ok(!renderItem({ source: "s", author: "a", title: "t", content: "c", forumVerified: true, context: [] }, 0).includes("thread_context"));
+ok("renderItem: a reply's thread context, also neutralized");
+
+// Times in post text → Discord timestamps, each reader's own zone. 2026-11-23 10:30 a.m. Pacific (PST).
+{
+  const now = new Date(Date.UTC(2026, 10, 23, 18, 30));
+  const at = (y: number, mo: number, d: number, h: number, mi = 0) => Date.UTC(y, mo, d, h, mi) / 1000;
+  const lt = (s: string) => timeTags(localTimes(s, now));
+  assert.equal(lt("made yesterday at 9:55 a.m. PST as a temporary measure."), `made yesterday at <t:${at(2026, 10, 23, 17, 55)}:t> as a temporary measure.`);
+  assert.equal(lt("Launch: November 4, 2026 at 3:00 p.m. Pacific."), `Launch: <t:${at(2026, 10, 4, 23)}:f>.`);
+  assert.equal(lt("Wednesday, December 9 at 10 a.m. PT"), `<t:${at(2026, 11, 9, 18)}:F>`, "a weekday: the full date");
+  assert.equal(lt("Jun. 2nd at 10am PDT"), `<t:${at(2026, 5, 2, 17)}:f>`, "summer time on that date; this year's June is nearer");
+  assert.equal(lt("January 5 at 9 a.m. PST"), `<t:${at(2027, 0, 5, 17)}:f>`, "next year's January is nearer");
+  assert.equal(lt("from 7–10 a.m. PDT"), `from <t:${at(2026, 10, 23, 14)}:t> – <t:${at(2026, 10, 23, 17)}:t>`, "PDT is UTC-7, even in November");
+  assert.equal(lt("1:00–3:00 p.m. PT"), `<t:${at(2026, 10, 23, 21)}:t> – <t:${at(2026, 10, 23, 23)}:t>`);
+  assert.equal(lt("12:00–2:00 a.m. PST"), `<t:${at(2026, 10, 23, 8)}:t> – <t:${at(2026, 10, 23, 10)}:t>`);
+  assert.equal(lt("Phase 1 - 3:00 p.m. PST"), `Phase 1 - <t:${at(2026, 10, 23, 23)}:t>`, "a bare number before a spaced dash isn't a time");
+  assert.equal(lt("December 9 from 7 - 10 a.m. PST"), `<t:${at(2026, 11, 9, 15)}:f> – <t:${at(2026, 11, 9, 18)}:t>`, "after a date it's a range");
+  assert.equal(lt("7 to 10 a.m. PST"),`<t:${at(2026, 10, 23, 15)}:t> – <t:${at(2026, 10, 23, 18)}:t>`);
+  assert.equal(lt("11–1 a.m. PT"),`<t:${at(2026, 10, 24, 7)}:t> – <t:${at(2026, 10, 24, 9)}:t>`, "11 p.m. to 1 a.m.");
+  assert.equal(lt("July 4, 2026 at 15:00 CET"), `<t:${at(2026, 6, 4, 14)}:f>`, "CET is UTC+1, even in summer");
+  assert.equal(lt("November 1, 2026 at 1:30 a.m. PST"), `<t:${at(2026, 10, 1, 9, 30)}:f>`, "the PST one of the repeated hour");
+  assert.equal(lt("11 to 1 p.m. CET"), `<t:${at(2026, 10, 23, 10)}:t> – <t:${at(2026, 10, 23, 12)}:t>`);
+  assert.equal(lt("10 p.m. - 2 a.m. EST"), `<t:${at(2026, 10, 24, 3)}:t> – <t:${at(2026, 10, 24, 7)}:t>`, "past midnight");
+  assert.equal(lt("15:00 CET (14:00 UTC)"), `<t:${at(2026, 10, 23, 14)}:t> (<t:${at(2026, 10, 23, 14)}:t>)`);
+  assert.equal(lt("3 p.m. PT ".repeat(60)).split("<t:").length - 1, 50, "at most 50 a text");
+  assert.equal(timeTags(`A …${localTimes("3 p.m. PT", now).slice(0, 8)}…`), "A ……", "a placeholder cut in half is dropped");
+  for (const same of ["Patch 2 PST", "at 25:00 UTC", "13 p.m. PT", "v1.2:30 PT", "3:00 Patch", "3:00 PTR", "<https://e.com/event-3:00PST>", "https://youtu.be/abcd-3:00PT", "May 40 at 3 p.m. PT"]) assert.equal(lt(same), same);
+  assert.equal(localTimes("9:55 a.m. PST", now).length, lt("9:55 a.m. PST").length, "the placeholder is as long as the tag");
+  // Through the alert and digest: tags survive escaping and cuts; titles (no timestamps there) are left alone.
+  const timed = buildAlertPayload({ source: "Blue Post (US)", title: "At 9:55 a.m. PST", url: "https://e/x", content: "Changed at 9:55 a.m. PST.\n" + "Word ".repeat(400), summary: "Fixed at 9:55 a.m. PST." }, { now }) as any;
+  assert.equal(timed.embeds[0].title, "At 9:55 a.m. PST");
+  assert.ok(timed.embeds[0].description.startsWith(`> **TL;DR:** Fixed at <t:${at(2026, 10, 23, 17, 55)}:t>.\n\nChanged at <t:${at(2026, 10, 23, 17, 55)}:t>.`));
+  const timedDigest = buildDigestMessage([{ id: "x", source: "Blizzard News", title: "T", url: "https://e/x", summary: "Live at 3 p.m. PT.", content: `## Live at 3 p.m. PT\n${"Text here. ".repeat(600)}` }], { now }).payload as any;
+  assert.match(timedDigest.embeds[0].description, new RegExp(`^> Live at <t:${at(2026, 10, 23, 23)}:t>\\.\\n\\*\\*Live at <t:${at(2026, 10, 23, 23)}:t>\\*\\*\\n`));
+  // A thread without its TL;DR clips each post's summary to 200: here through a placeholder.
+  const clipped = buildDigestMessage([1, 2].map(i => ({ id: `c${i}`, source: "Blue Post (US)", title: "T", url: `https://us.forums.blizzard.com/en/wow/t/x/900/${i}`, summary: "x".repeat(187) + " at 3 p.m. PT.", content: "Body." })), { now }).payload as any;
+  for (const e of [...timedDigest.embeds, ...clipped.embeds]) assert.ok(!/[\u0001\u0002]/.test(e.description ?? ""), "no placeholder left over");
+}
+ok("localTimes: times with a zone become Discord timestamps, in alerts and the digest");
 
 // Forum regions: US only unless FORUM_REGIONS says otherwise
 assert.deepEqual(forumRegions({}), ["us"]);
