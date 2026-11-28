@@ -107,11 +107,22 @@ export function shortLink(url: string): string {
     .replace(/^(https:\/\/[a-z]{2}\.forums\.blizzard\.com\/[a-z]{2}\/wow\/t\/)[^/]+\/(\d+\/\d+)$/i, "$1$2")
     .replace(/^(https:\/\/news\.blizzard\.com\/[a-z]{2}-[a-z]{2}\/article\/\d+)\/[^/?#]+$/i, "$1");
 }
-/** A post's lines (blank ones dropped), without a line that is only a date its title already shows. */
+/**
+ * A post's lines (blank ones dropped), without a date its title already shows, nor a heading the
+ * title already shows above its first other line: an edited article's "## **Hotfixes**". A later
+ * heading divides sections ("## WoW: Forever" after "## World of Warcraft: Midnight"), so it stays.
+ */
 function postLines(text: string, title: string): string[] {
+  const words = (s: string) => ` ${s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()} `;
+  const titleWords = words(title.replace(/ \((?:edited|updated)\)$/, "")); // not the suffix an edit's title gets
+  let leading = true;
   return text.split("\n").map(l => l.trimEnd()).filter(l => {
-    const date = stripMarkdown(l.replace(/^#{1,3} /, "")).trim();
-    return l.trim() && !(/^[A-Z][a-z]+ \d{1,2}, \d{4}$/.test(date) && title.includes(date));
+    if (!l.trim()) return false;
+    const shown = stripMarkdown(l.replace(/^#{1,3} /, "")).trim();
+    const date = /^[A-Z][a-z]+ \d{1,2}, \d{4}$/.test(shown) && title.includes(shown);
+    const heading = leading && (/^#{1,3} /.test(l) || !!sectionTitle(l)) && words(shown).trim() !== "" && titleWords.includes(words(shown));
+    if (!date && !heading) leading = false;
+    return !date && !heading;
   });
 }
 const linkText = (title: string) => escapeMarkdown(clip(title.replace(/[[\]]/g, "").replace(/\s+/g, " ").trim(), 200));

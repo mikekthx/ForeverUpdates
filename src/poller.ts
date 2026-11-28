@@ -53,18 +53,27 @@ export async function runPoll(env: Env, opts: { seedOnly?: boolean } = {}): Prom
   // 2. New documents. On the first run (or /seed) everything visible is recorded as already seen;
   //    only watch-worthy ones are fetched, to get a baseline for edit detection.
   const seeding = opts.seedOnly || !kv.has(seedFlag);
-  const existing = new Map<string, string>(); // key → stored URL
+  const existing = new Map<string, { url: string; title: string }>(); // key → stored URL and title
   for (let i = 0; i < hits.length; i += 50) {
     const chunk = hits.slice(i, i + 50).map(h => h.key);
-    const { results } = await db.prepare(`SELECT key, url FROM documents WHERE key IN (${placeholders(chunk.length)})`)
-      .bind(...chunk).all<{ key: string; url: string }>();
-    for (const r of results ?? []) existing.set(r.key, r.url);
+    const { results } = await db.prepare(`SELECT key, url, title FROM documents WHERE key IN (${placeholders(chunk.length)})`)
+      .bind(...chunk).all<{ key: string; url: string; title: string }>();
+    for (const r of results ?? []) existing.set(r.key, r);
   }
-  // A news article renamed by Blizzard (its title, so its URL slug, changed): store the listing's URL,
-  // so probes and fetches go straight to it (the old one only redirects in a browser; getHtml
-  // follows that as a fallback).
-  const moved = hits.filter(h => h.kind === "news" && existing.has(h.key) && existing.get(h.key) !== h.url);
-  if (moved.length) await db.batch(moved.map(h => db.prepare("UPDATE documents SET url = ? WHERE key = ?").bind(h.url, h.key)));
+  // A news article renamed by Blizzard (a hotfix article gets each new day's date, and a new URL
+  // slug): store the listing's URL, so probes and fetches go straight to it (the old one only
+  // redirects in a browser; getHtml follows that as a fallback), and its title, so the edit that
+  // comes with it is titled right. This runs before the probes, which queue that edit. A title
+  // guessed from the slug never replaces a real one.
+  const renamed = (h: (typeof hits)[number]) => {
+    const e = existing.get(h.key);
+    return !!e && h.kind === "news" && (e.url !== h.url || (!h.titleFromSlug && e.title !== h.title));
+  };
+  const moved = hits.filter(renamed);
+  if (moved.length) {
+    await db.batch(moved.map(h => db.prepare("UPDATE documents SET url = ?, title = ?, title_from_slug = 0 WHERE key = ?")
+      .bind(h.url, h.titleFromSlug ? existing.get(h.key)!.title : h.title, h.key)));
+  }
   const fresh = hits.filter(h => !existing.has(h.key));
   const messages: WorkMessage[] = [];
   const now = Date.now();

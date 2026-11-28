@@ -812,6 +812,34 @@ const e1eu = await fingerprintEdit("WoW: Forever Known Issues", ["Some quest giv
 assert.notEqual(e1, e2); assert.equal(e1, e1eu);
 assert.notEqual(await fingerprintNew("T", intro), e1, "short new and edit fingerprints never collide");
 ok("fingerprintEdit: successive edits differ, US/EU copies of an edit match");
+// news:24315281 + post:us:31066529 (2026-11-25): one day's hotfixes as an article edit and a forum
+// reply, a fix listed under two classes. The edit's repeated line is new both times, so they match.
+{
+  const pets = "  - Fixed an issue where pets had 0% critical strike chance on melee basic attacks.";
+  const day = ["**November 25, 2026**", "**Classes**", "- **Hunter**", pets, "- **Warlock**", pets,
+    "  - Fixed an issue where Succubus and Incubus had 5% higher critical strike chance than intended.",
+    "- The Weaponmaster talent no longer fails to reapply when the Warrior dies in Battlegrounds."];
+  const old = ["## **Hotfixes**", "**November 20, 2026**", "**Classes**", "- **Hunter**", "  - Arcane Shot no longer fails to trigger its cooldown after a Feign Death."];
+  const { added } = markAddedLines(old.join("\n"), [old[0], ...day, ...old.slice(1)].join("\n"));
+  assert.equal(added.filter(l => l === pets).length, 2, "a repeated new line is new each time");
+  assert.equal(await fingerprintEdit("WoW: Forever Hotfixes - November 6, 2026", added), await fingerprintNew("WoW: Forever Hotfixes - November 25, 2026", day.join("\n")));
+}
+ok("fingerprint: an article edit and the forum reply with the same hotfixes match, repeated lines too");
+// The same article edit as an alert: its heading and the new day's date are already in the title.
+{
+  const content = `${UPDATE_MARKER}\n## **Hotfixes**\n[NEW] **November 25, 2026**\n**Classes**\n- **Druid**\n[NEW]   - Hurricane now correctly lands its final hit.`;
+  const d = (buildAlertPayload({ source: "Blizzard News", title: "WoW: Forever Hotfixes - November 25, 2026 (updated)", url: "https://e/x", content, summary: "" }, {}) as any).embeds[0].description;
+  assert.equal(d, "### Classes\n- **Druid**\n  - Hurricane now correctly lands its final hit.");
+  const other = (buildAlertPayload({ source: "Blizzard News", title: "Patch notes", url: "https://e/x", content: "## Hotfixes\n**Druid**\n- A fix.", summary: "" }, {}) as any).embeds[0].description;
+  assert.equal(other, "## Hotfixes\n### Druid\n- A fix.", "headings the title doesn't show stay");
+  const sections = (buildAlertPayload({ source: "Blizzard News", title: "WoW: Forever Hotfixes", url: "https://e/x", content: "## World of Warcraft: Midnight\n- A.\n## WoW: Forever\n- B.", summary: "" }, {}) as any).embeds[0].description;
+  assert.equal(sections, "## World of Warcraft: Midnight\n- A.\n## WoW: Forever\n- B.", "a heading lower down divides sections: it stays");
+  const words = (buildAlertPayload({ source: "Blizzard News", title: "Subclasses explained", url: "https://e/x", content: "**Classes**\n- A.", summary: "" }, {}) as any).embeds[0].description;
+  assert.equal(words, "### Classes\n- A.", "whole words only");
+  const suffix = (buildAlertPayload({ source: "Blizzard News", title: "Known Issues (updated)", url: "https://e/x", content: "**Updated**\n- A.", summary: "" }, {}) as any).embeds[0].description;
+  assert.equal(suffix, "### Updated\n- A.", "not the edit's own (updated)");
+}
+ok("buildAlertPayload: no heading or date the title already shows");
 
 // The same hotfix notes as a new forum reply and as lines added to the news article match, though
 // titles differ and the article's edit drops headers it already had ("Classes", "Druid").

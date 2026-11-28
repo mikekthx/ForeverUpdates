@@ -777,7 +777,10 @@ try {
   world.geminiMode = "ok";
   ok("no model available: urgent Blue Post alerts on keywords at once; routine post retried, then classified");
 
-  // 8. Hotfix post edited in place: only the new section is triaged, alerted once.
+  // 8. Hotfix post edited in place: only the new section is triaged, alerted once. Blizzard renames
+  //    it for the new day at the same time: the alert has the new title, without the date line.
+  assert.ok(world.newsHtml.includes("<h3>Hotfixes: November 4, 2026</h3>"));
+  world.newsHtml = world.newsHtml.replace("<h3>Hotfixes: November 4, 2026</h3>", "<h3>Hotfixes: November 6, 2026</h3>"); // the URL stays: renamed in 7
   world.articles["2"] = articlePage(["November 6, 2026", "WoW: Forever", "Fixed an issue causing realms to go offline during login queues.",
     "November 4, 2026", "World of Warcraft: Midnight", "Fixed an issue with Delves for Midnight players only."]);
   await makeDue("key = 'news:2'");
@@ -788,7 +791,9 @@ try {
   assert.ok(p8.includes("[NEW] Fixed an issue causing realms to go offline"));
   assert.ok(p8.includes("\nFixed an issue with Delves for Midnight players only."), "old text present unmarked as context");
   assert.equal(alerts().length, before + 1);
-  assert.match(alerts().at(-1).embeds[0].title, /\(updated\)/);
+  assert.equal(alerts().at(-1).embeds[0].title, "Hotfixes: November 6, 2026 (updated)");
+  assert.ok(!alerts().at(-1).embeds[0].description.split("\n").includes("November 6, 2026"), "no line that is only the title's date");
+  assert.equal((await doc("news:2")).title, "Hotfixes: November 6, 2026");
   await makeDue("key = 'news:2'");
   gem = world.geminiCalls.length;
   await poll(); s = await settle();

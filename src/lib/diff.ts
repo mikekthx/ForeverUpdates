@@ -17,8 +17,9 @@ export function markAddedLines(oldText: string, newText: string): { added: strin
     const line = raw.trimEnd(); // a nested list item keeps its indent
     const n = norm(line);
     if (!n) continue;
+    // A line that wasn't there before is new each time it appears: hotfix notes repeat a fix under
+    // two classes, and the forum copy of those notes (same crosspost fingerprint) has both.
     if (!before.has(n)) {
-      before.add(n); // a line repeated within the new text is only "new" once
       added.push(line);
       marked.push(`[NEW] ${line}`);
     } else {
